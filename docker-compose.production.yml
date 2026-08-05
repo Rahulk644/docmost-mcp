@@ -1,0 +1,34 @@
+services:
+  docmost-mcp:
+    build:
+      context: .
+    image: continualengine/docmost-mcp:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DOCMOST_MCP_BIND: 0.0.0.0:8787
+      DOCMOST_MCP_ALLOWED_HOSTS: localhost:8787,127.0.0.1:8787
+      DOCMOST_MCP_ALLOWED_ORIGINS: http://localhost:8787,http://127.0.0.1:8787
+      DOCMOST_MCP_AUDIT_LOG: /var/lib/docmost-mcp/mutations.jsonl
+    ports:
+      - 127.0.0.1:8787:8787
+    networks:
+      - docmost
+    volumes:
+      - docmost-mcp-state:/var/lib/docmost-mcp
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  docmost-mcp-state:
+
+networks:
+  docmost:
+    external: true
+    name: docmost_default

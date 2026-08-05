@@ -1,0 +1,24 @@
+{
+  "name": "docmost-mcp",
+  "version": "1.0.0",
+  "description": "Read and manage Docmost through an authenticated Streamable HTTP MCP server.",
+  "author": {
+    "name": "Rahul Khatri"
+  },
+  "license": "MIT",
+  "keywords": ["docmost", "documentation", "knowledge-base", "mcp"],
+  "interface": {
+    "displayName": "Docmost MCP",
+    "shortDescription": "Secure Docmost access over HTTP.",
+    "longDescription": "Search, read, organize, and—with explicit safeguards—update a Docmost workspace through authenticated Streamable HTTP.",
+    "developerName": "Rahul Khatri",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Search Docmost for the latest release notes.",
+      "Summarize a Docmost page and its comments.",
+      "Draft a Docmost page, then ask before creating it."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

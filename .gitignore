@@ -1,0 +1,20 @@
+node_modules
+dist
+.DS_Store
+coverage
+*.log
+native/auth-helper/target
+helpers
+*.tgz
+target
+release-artifacts
+release-packages
+npm/launcher/node_modules
+npm/launcher/bin
+
+# Local live-E2E credentials (never commit)
+.env.e2e
+.env
+
+# Playwright MCP browser session artifacts
+.playwright-mcp
