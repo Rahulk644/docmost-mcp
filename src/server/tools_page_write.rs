@@ -17,7 +17,7 @@ use crate::{
 #[tool_router(router = page_write_tool_router, vis = "pub(crate)")]
 impl DocmostMcpServer {
     #[tool(
-        name = "create_page",
+        name = "docmost_create_page",
         description = "Create a new Docmost page in a space from Markdown content.",
         annotations(
             title = "Create Docmost Page",
@@ -67,7 +67,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "update_page",
+        name = "docmost_update_page",
         description = "Update an existing Docmost page's title and/or Markdown content.",
         annotations(
             title = "Update Docmost Page",

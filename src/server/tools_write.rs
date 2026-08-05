@@ -20,7 +20,7 @@ use crate::{
 #[tool_router(router = write_tool_router, vis = "pub(crate)")]
 impl DocmostMcpServer {
     #[tool(
-        name = "duplicate_page",
+        name = "docmost_duplicate_page",
         description = "Duplicate a Docmost page (with its sub-pages) within its space.",
         annotations(
             title = "Duplicate Docmost Page",
@@ -46,7 +46,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "copy_page_to_space",
+        name = "docmost_copy_page_to_space",
         description = "Copy a Docmost page (with its sub-pages) into a different space.",
         annotations(
             title = "Copy Docmost Page to Space",
@@ -73,7 +73,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "move_page",
+        name = "docmost_move_page",
         description = "Move a Docmost page under a new parent page, or to the space root. \
                        The page is appended after the target parent's existing children.",
         annotations(
@@ -101,7 +101,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "move_page_to_space",
+        name = "docmost_move_page_to_space",
         description = "Move a Docmost page (with its sub-pages) to a different space.",
         annotations(
             title = "Move Docmost Page to Space",
@@ -137,7 +137,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "create_space",
+        name = "docmost_create_space",
         description = "Create a new Docmost space with a name and URL slug.",
         annotations(
             title = "Create Docmost Space",
@@ -164,7 +164,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "update_space",
+        name = "docmost_update_space",
         description = "Update a Docmost space's name, slug, and/or description.",
         annotations(
             title = "Update Docmost Space",
@@ -195,7 +195,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "create_comment",
+        name = "docmost_create_comment",
         description = "Add a page-level comment to a Docmost page, written in Markdown.",
         annotations(
             title = "Create Docmost Comment",
@@ -228,7 +228,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "update_comment",
+        name = "docmost_update_comment",
         description = "Replace an existing Docmost comment's body with new Markdown content.",
         annotations(
             title = "Update Docmost Comment",

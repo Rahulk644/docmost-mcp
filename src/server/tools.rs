@@ -47,7 +47,7 @@ impl DocmostMcpServer {
 #[tool_router(vis = "pub(crate)")]
 impl DocmostMcpServer {
     #[tool(
-        name = "list_spaces",
+        name = "docmost_list_spaces",
         description = "List all available documentation spaces in Docmost, including names, slugs, and IDs.",
         annotations(title = "List Docmost Spaces", read_only_hint = true)
     )]
@@ -84,7 +84,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "search_docs",
+        name = "docmost_search_docs",
         description = "Search Docmost documentation and optionally filter results by a space ID from list_spaces.",
         annotations(title = "Search Docmost", read_only_hint = true)
     )]
@@ -97,7 +97,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "search_pages",
+        name = "docmost_search_pages",
         description = "Search Docmost pages and optionally filter results by a space ID from list_spaces.",
         annotations(title = "Search Docmost Pages", read_only_hint = true)
     )]
@@ -110,7 +110,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "get_space",
+        name = "docmost_get_space",
         description = "Fetch Docmost space details by space ID, including membership context for the current user.",
         annotations(title = "Get Docmost Space", read_only_hint = true)
     )]
@@ -159,7 +159,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "get_page",
+        name = "docmost_get_page",
         description = "Fetch a Docmost page by slug ID and return its content as Markdown.",
         annotations(title = "Get Docmost Page", read_only_hint = true)
     )]
@@ -232,7 +232,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "list_pages",
+        name = "docmost_list_pages",
         description = "List recent Docmost pages in a space by space ID.",
         annotations(title = "List Docmost Pages", read_only_hint = true)
     )]
@@ -253,7 +253,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "list_child_pages",
+        name = "docmost_list_child_pages",
         description = "List child pages for a Docmost page ID.",
         annotations(title = "List Docmost Child Pages", read_only_hint = true)
     )]
@@ -274,7 +274,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "get_comments",
+        name = "docmost_get_comments",
         description = "List Docmost comments for a page ID.",
         annotations(title = "Get Docmost Comments", read_only_hint = true)
     )]
@@ -291,7 +291,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "list_workspace_members",
+        name = "docmost_list_workspace_members",
         description = "List Docmost workspace members visible to the current user.",
         annotations(title = "List Docmost Workspace Members", read_only_hint = true)
     )]
@@ -313,7 +313,7 @@ impl DocmostMcpServer {
     }
 
     #[tool(
-        name = "get_current_user",
+        name = "docmost_get_current_user",
         description = "Fetch the current Docmost user and workspace context.",
         annotations(title = "Get Current Docmost User", read_only_hint = true)
     )]

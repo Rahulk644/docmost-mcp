@@ -33,26 +33,26 @@ async fn server_lists_expected_tools() -> Result<()> {
         .collect::<Vec<_>>();
 
     for expected in [
-        "list_spaces",
-        "search_docs",
-        "search_pages",
-        "get_space",
-        "get_page",
-        "list_pages",
-        "list_child_pages",
-        "get_comments",
-        "list_workspace_members",
-        "get_current_user",
-        "create_page",
-        "update_page",
-        "duplicate_page",
-        "copy_page_to_space",
-        "move_page",
-        "move_page_to_space",
-        "create_space",
-        "update_space",
-        "create_comment",
-        "update_comment",
+        "docmost_list_spaces",
+        "docmost_search_docs",
+        "docmost_search_pages",
+        "docmost_get_space",
+        "docmost_get_page",
+        "docmost_list_pages",
+        "docmost_list_child_pages",
+        "docmost_get_comments",
+        "docmost_list_workspace_members",
+        "docmost_get_current_user",
+        "docmost_create_page",
+        "docmost_update_page",
+        "docmost_duplicate_page",
+        "docmost_copy_page_to_space",
+        "docmost_move_page",
+        "docmost_move_page_to_space",
+        "docmost_create_space",
+        "docmost_update_space",
+        "docmost_create_comment",
+        "docmost_update_comment",
     ] {
         assert!(
             tool_names.iter().any(|name| name == expected),
@@ -123,7 +123,7 @@ async fn server_get_page_requires_slug_id_schema() -> Result<()> {
     let get_page = tools
         .tools
         .into_iter()
-        .find(|tool| tool.name == "get_page")
+        .find(|tool| tool.name == "docmost_get_page")
         .expect("get_page tool should exist");
     let properties = get_page
         .input_schema
@@ -134,7 +134,7 @@ async fn server_get_page_requires_slug_id_schema() -> Result<()> {
     assert!(properties.contains_key("slug_id"));
 
     let result = client
-        .call_tool(CallToolRequestParams::new("get_page").with_arguments(serde_json::Map::new()))
+        .call_tool(CallToolRequestParams::new("docmost_get_page").with_arguments(serde_json::Map::new()))
         .await?;
     assert_eq!(result.is_error, Some(true));
     assert!(format!("{result:?}").contains("slug_id"));
@@ -158,39 +158,39 @@ async fn server_required_input_fields_are_present() -> Result<()> {
     let tools = client.list_tools(None).await?;
 
     for (tool_name, property_name) in [
-        ("get_page", "slug_id"),
-        ("get_space", "space_id"),
-        ("list_pages", "space_id"),
-        ("list_child_pages", "page_id"),
-        ("get_comments", "page_id"),
-        ("search_docs", "query"),
-        ("search_pages", "query"),
-        ("create_page", "space_id"),
-        ("create_page", "title"),
-        ("update_page", "page_id"),
-        ("duplicate_page", "page_id"),
-        ("copy_page_to_space", "page_id"),
-        ("copy_page_to_space", "space_id"),
-        ("move_page", "page_id"),
-        ("move_page_to_space", "page_id"),
-        ("move_page_to_space", "space_id"),
-        ("create_space", "name"),
-        ("create_space", "slug"),
-        ("update_space", "space_id"),
-        ("create_comment", "page_id"),
-        ("create_comment", "markdown"),
-        ("update_comment", "comment_id"),
-        ("update_comment", "markdown"),
-        ("create_page", "confirm"),
-        ("update_page", "confirm"),
-        ("duplicate_page", "confirm"),
-        ("copy_page_to_space", "confirm"),
-        ("move_page", "confirm"),
-        ("move_page_to_space", "confirm"),
-        ("create_space", "confirm"),
-        ("update_space", "confirm"),
-        ("create_comment", "confirm"),
-        ("update_comment", "confirm"),
+        ("docmost_get_page", "slug_id"),
+        ("docmost_get_space", "space_id"),
+        ("docmost_list_pages", "space_id"),
+        ("docmost_list_child_pages", "page_id"),
+        ("docmost_get_comments", "page_id"),
+        ("docmost_search_docs", "query"),
+        ("docmost_search_pages", "query"),
+        ("docmost_create_page", "space_id"),
+        ("docmost_create_page", "title"),
+        ("docmost_update_page", "page_id"),
+        ("docmost_duplicate_page", "page_id"),
+        ("docmost_copy_page_to_space", "page_id"),
+        ("docmost_copy_page_to_space", "space_id"),
+        ("docmost_move_page", "page_id"),
+        ("docmost_move_page_to_space", "page_id"),
+        ("docmost_move_page_to_space", "space_id"),
+        ("docmost_create_space", "name"),
+        ("docmost_create_space", "slug"),
+        ("docmost_update_space", "space_id"),
+        ("docmost_create_comment", "page_id"),
+        ("docmost_create_comment", "markdown"),
+        ("docmost_update_comment", "comment_id"),
+        ("docmost_update_comment", "markdown"),
+        ("docmost_create_page", "confirm"),
+        ("docmost_update_page", "confirm"),
+        ("docmost_duplicate_page", "confirm"),
+        ("docmost_copy_page_to_space", "confirm"),
+        ("docmost_move_page", "confirm"),
+        ("docmost_move_page_to_space", "confirm"),
+        ("docmost_create_space", "confirm"),
+        ("docmost_update_space", "confirm"),
+        ("docmost_create_comment", "confirm"),
+        ("docmost_update_comment", "confirm"),
     ] {
         let tool = tools
             .tools

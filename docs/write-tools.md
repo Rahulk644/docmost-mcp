@@ -1,8 +1,8 @@
 # Write-tool safety contract
 
-The server exposes ten mutation tools: `create_page`, `update_page`,
-`duplicate_page`, `copy_page_to_space`, `move_page`, `move_page_to_space`,
-`create_space`, `update_space`, `create_comment`, and `update_comment`.
+The server exposes ten mutation tools: `docmost_create_page`, `docmost_update_page`,
+`docmost_duplicate_page`, `docmost_copy_page_to_space`, `docmost_move_page`, `docmost_move_page_to_space`,
+`docmost_create_space`, `docmost_update_space`, `docmost_create_comment`, and `docmost_update_comment`.
 
 All ten are default-deny. A mutation reaches Docmost only when both conditions are
 true:
