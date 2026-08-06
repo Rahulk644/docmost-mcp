@@ -28,7 +28,7 @@ impl ResponseFormat {
 
 /// Shared `response_format` description, so every tool documents it identically.
 pub const RESPONSE_FORMAT_DESC: &str = "Output format: `markdown` (default, condensed and human-readable) or `json` \
-     (complete records plus pagination metadata).";
+     (complete untruncated records, including fields not explicitly modelled, plus pagination metadata).";
 
 /// Input for tools that take no arguments beyond the output format.
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
@@ -252,7 +252,7 @@ pub struct CreateCommentInput {
     #[schemars(description = "The Docmost page ID (UUID) to comment on.")]
     pub page_id: String,
     #[schemars(
-        description = "Comment body as Markdown. Creates a page-level comment (not anchored to a text selection). To tag a user, write a link with a `user:` URL: `[Display Name](user:USER_UUID)` (get USER_UUID from list_workspace_members); `[Title](page:PAGE_UUID)` mentions a page. Tables, images, and task lists are not supported inside comments."
+        description = "Comment body as Markdown. Creates a page-level comment (not anchored to a text selection). To tag a user, write a link with a `user:` URL: `[Display Name](user:USER_UUID)` (get USER_UUID from docmost_list_workspace_members); `[Title](page:PAGE_UUID)` mentions a page. Tables, images, and task lists are not supported inside comments."
     )]
     pub markdown: String,
 }

@@ -206,6 +206,12 @@ impl DocmostMcpServer {
             .await
             .map_err(internal_error)?
         else {
+            // A JSON caller must get JSON on EVERY path. Returning prose here meant
+            // `response_format: "json"` could still hand back a sentence, so anything
+            // parsing the result broke on a missing page instead of reading a null.
+            if wants_json(input.response_format) {
+                return as_json(&serde_json::json!({ "page": null, "markdown": null }));
+            }
             return Ok(format!(
                 "No Docmost page was found for slug ID \"{}\".",
                 input.slug_id

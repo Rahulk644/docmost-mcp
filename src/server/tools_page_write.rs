@@ -60,7 +60,7 @@ impl DocmostMcpServer {
             output.push_str(
                 "\n\nNote: this page was created at the space root — parent_page_id is not \
                  applied when a Markdown body is provided (Docmost's import path has no parent \
-                 parameter). Use move_page afterwards to nest it under a parent.",
+                 parameter). Use docmost_move_page afterwards to nest it under a parent.",
             );
         }
         Ok(output)
@@ -118,12 +118,12 @@ impl DocmostMcpServer {
             Some(version) => format!(
                 "Note: this Docmost server (v{version}) does not apply page-body edits over \
                  REST — the body was NOT changed (page bodies are edited through the \
-                 collaborative editor before v0.70.0). Create a new page with create_page, \
+                 collaborative editor before v0.70.0). Create a new page with docmost_create_page, \
                  or edit the body in the Docmost app."
             ),
             None => "Note: the Docmost server version could not be determined; if the page \
                      body did not change, this server applies body edits through the \
-                     collaborative editor (not REST). Create a new page with create_page instead."
+                     collaborative editor (not REST). Create a new page with docmost_create_page instead."
                 .to_string(),
         })
     }

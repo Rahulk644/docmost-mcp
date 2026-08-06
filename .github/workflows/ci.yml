@@ -43,6 +43,22 @@ jobs:
       - name: Tests
         run: cargo test --all-features
 
+  docker:
+    name: docker build · runtime smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A full build, not `docker build --check`. The Dockerfile COPYs the compiled
+      # binary by name, so renaming the crate silently broke the image while every
+      # cargo job stayed green — this job is what catches that class of break.
+      - name: Build production image
+        run: docker build --tag docmost-mcp:ci .
+
+      # Proves the packaged binary actually runs, not merely that the layers built.
+      - name: Verify packaged binary
+        run: docker run --rm docmost-mcp:ci --help
+
   audit:
     name: dependency advisories
     runs-on: ubuntu-latest

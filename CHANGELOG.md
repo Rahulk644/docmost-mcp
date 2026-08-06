@@ -37,9 +37,26 @@ All notable changes are documented here. The format loosely follows
   for members) and previously reported "Showing 10 of 10", which reads as "that is
   everything". The footer now names the cap, the total, and the cursor to continue.
 
+- **`response_format: json` now really does return complete records.** Serde drops
+  unknown keys by default, so the "complete records" promise was false: any field
+  Docmost returned that this server did not model — `createdAt`, `workspaceId`,
+  `isLocked`, `contributors`, `permissions` and so on — was silently discarded.
+  Every response type now captures unmodelled fields and re-emits them at the top
+  level, so JSON output matches what the API actually sent and new Docmost fields
+  appear without a code change. (`Eq` was dropped from these types, since
+  `serde_json::Value` is not `Eq`; nothing required it.)
+- **`docmost_get_page` returned prose on the not-found path even in JSON mode.** A
+  caller asking for `json` got a sentence when the page was missing, breaking any
+  parser. It now returns `{"page": null, "markdown": null}`.
+- Three more agent-visible tool references left unprefixed by the rename: comment
+  guidance pointed at `list_workspace_members`, and page-write guidance at
+  `move_page` and `create_page`.
+
 ### Added
-- CI: `cargo fmt --check`, strict `clippy -D warnings`, the test suite, and a
-  dependency-advisory audit.
+- CI: `cargo fmt --check`, strict `clippy -D warnings`, the test suite, a
+  **production image build with a runtime smoke test**, and a dependency-advisory
+  audit. The image build is what catches a broken `Dockerfile` COPY path — the
+  cargo jobs stayed green while the image was broken by the crate rename.
 - Repository hygiene: `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, and issue/PR templates.
 
 ## [1.0.0]

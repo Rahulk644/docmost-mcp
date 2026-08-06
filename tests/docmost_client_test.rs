@@ -127,3 +127,50 @@ fn explicit_no_next_page_is_preserved() {
     });
     assert_eq!(page.has_more, Some(false));
 }
+
+#[test]
+fn json_mode_preserves_fields_this_server_does_not_model() {
+    // The `response_format: "json"` contract promises complete records. Serde drops
+    // unknown keys by default, so before this the promise was false: fields Docmost
+    // added after these structs were written (createdAt, workspaceId, isLocked,
+    // contributors, permissions, ...) vanished silently.
+    use docmost_mcp::types::DocmostPage;
+
+    let raw = serde_json::json!({
+        "id": "p1",
+        "slugId": "abc",
+        "title": "Roadmap",
+        "createdAt": "2026-08-06T00:00:00Z",
+        "workspaceId": "ws-1",
+        "isLocked": false,
+        "contributors": ["u1", "u2"],
+        "permissions": { "edit": true }
+    });
+
+    let page: DocmostPage = serde_json::from_value(raw.clone()).expect("parses");
+    let back = serde_json::to_value(&page).expect("serializes");
+
+    // Modelled fields survive.
+    assert_eq!(back["id"], "p1");
+    assert_eq!(back["title"], "Roadmap");
+    // Unmodelled fields survive too — flattened back to the top level, not nested.
+    assert_eq!(back["createdAt"], "2026-08-06T00:00:00Z");
+    assert_eq!(back["workspaceId"], "ws-1");
+    assert_eq!(back["isLocked"], false);
+    assert_eq!(back["contributors"], serde_json::json!(["u1", "u2"]));
+    assert_eq!(back["permissions"]["edit"], true);
+}
+
+#[test]
+fn unmodelled_fields_are_not_nested_under_extra() {
+    // They must round-trip at the top level. If they surfaced as {"extra": {...}}
+    // the JSON shape would differ from the API's and callers would break.
+    use docmost_mcp::types::DocmostSpace;
+
+    let raw = serde_json::json!({ "id": "s1", "slug": "eng", "somethingNew": 42 });
+    let space: DocmostSpace = serde_json::from_value(raw).expect("parses");
+    let back = serde_json::to_value(&space).expect("serializes");
+
+    assert_eq!(back["somethingNew"], 42);
+    assert!(back.get("extra").is_none(), "must not nest: {back}");
+}
