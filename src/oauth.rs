@@ -394,7 +394,7 @@ async fn complete_authorization(
             .get(&form.request_id)
             .cloned();
         if let Some(completed) = completed.filter(|grant| grant.expires_at > Utc::now()) {
-            return authorization_redirect(&completed.location);
+            return authorization_response(&completed.location);
         }
         return oauth_html_error(
             StatusCode::BAD_REQUEST,
@@ -489,18 +489,51 @@ async fn complete_authorization(
     );
     state.inner.pending.write().await.remove(&form.request_id);
 
-    authorization_redirect(&location)
+    authorization_response(&location)
 }
 
-fn authorization_redirect(location: &str) -> Response {
+fn authorization_response(location: &str) -> Response {
+    let uses_loopback_callback = Url::parse(location)
+        .is_ok_and(|url| url.scheme() == "http" && is_loopback_host(url.host_str()));
+    if uses_loopback_callback {
+        return authorization_loopback_bridge(location);
+    }
+
     let mut response = Redirect::to(location).into_response();
+    clear_csrf_cookie(&mut response);
+    response
+}
+
+fn authorization_loopback_bridge(location: &str) -> Response {
+    let escaped_location = escape_html(location);
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PREP Docs authorized</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#f5f6f8;margin:0;display:grid;place-items:center;min-height:100vh;color:#17202a}}
+main{{width:min(420px,calc(100% - 40px));background:white;padding:32px;border-radius:14px;box-shadow:0 10px 30px #0002}}
+h1{{font-size:1.35rem;margin:0 0 8px}}p{{color:#59636e;line-height:1.5}}
+a{{box-sizing:border-box;display:block;width:100%;margin-top:24px;padding:12px;border-radius:8px;background:#202938;color:white;text-align:center;text-decoration:none;font-weight:700}}
+small{{display:block;margin-top:16px;color:#697482;line-height:1.45}}
+</style></head><body><main><h1>PREP Docs authorized</h1>
+<p>Your Docmost account was accepted. Continue to the local Codex callback to finish connecting the MCP.</p>
+<a id="continue-to-client" href="{escaped_location}">Continue to Codex</a>
+<small>Chrome may block automatic navigation from a public site to localhost. This explicit button keeps the callback secure and reliable.</small>
+</main></body></html>"#
+    );
+    let mut response = hardened_auth_response(Html(html).into_response());
+    clear_csrf_cookie(&mut response);
+    response
+}
+
+fn clear_csrf_cookie(response: &mut Response) {
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_static(
             "mcp_auth_csrf=; Path=/oauth/authorize; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
         ),
     );
-    response
 }
 
 async fn exchange_token(State(state): State<OAuthState>, Form(form): Form<TokenForm>) -> Response {
@@ -1175,28 +1208,23 @@ mod tests {
             .form(&login_form)
             .send()
             .await?;
-        assert!(authorized.status().is_redirection());
-        let location = authorized
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .expect("authorization redirect")
-            .to_string();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let authorized_html = authorized.text().await?;
+        assert!(authorized_html.contains("Continue to Codex"));
+        let location = callback_href(&authorized_html).expect("authorization callback link");
 
         // Browsers can submit the form twice before following the first redirect.
         // The cleared CSRF cookie means the duplicate must replay the completed
-        // redirect rather than trying to authorize the account again.
+        // callback bridge rather than trying to authorize the account again.
         let duplicate = client
             .post(format!("{base}/oauth/authorize"))
             .form(&login_form)
             .send()
             .await?;
-        assert!(duplicate.status().is_redirection());
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let duplicate_html = duplicate.text().await?;
         assert_eq!(
-            duplicate
-                .headers()
-                .get(header::LOCATION)
-                .and_then(|value| value.to_str().ok()),
+            callback_href(&duplicate_html).as_deref(),
             Some(location.as_str())
         );
 
@@ -1227,5 +1255,11 @@ mod tests {
         let marker = format!("name=\"{name}\" value=\"");
         let remainder = html.split_once(&marker)?.1;
         Some(remainder.split_once('"')?.0.to_string())
+    }
+
+    fn callback_href(html: &str) -> Option<String> {
+        let marker = "id=\"continue-to-client\" href=\"";
+        let remainder = html.split_once(marker)?.1;
+        Some(remainder.split_once('"')?.0.replace("&amp;", "&"))
     }
 }
