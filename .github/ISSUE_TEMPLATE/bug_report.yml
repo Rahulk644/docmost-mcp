@@ -1,0 +1,73 @@
+name: Bug Report
+description: Something is broken — help us reproduce it
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this. The most useful reports say which
+        tool you called, with what arguments, and what came back.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+      placeholder: Calling docmost_list_pages returned ... but I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The tool name and arguments matter — please include them.
+      placeholder: |
+        1. Start the server with ...
+        2. Call `docmost_get_page` with `{ "slug_id": "..." }`
+        3. See error
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: docmost-mcp version
+      description: From Cargo.toml, or the git commit you built.
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: docmost-version
+    attributes:
+      label: Docmost server version and edition
+      description: Community or Enterprise, self-hosted or Cloud. Several APIs differ between them.
+      placeholder: e.g. 0.24.0, Community, self-hosted
+    validations:
+      required: true
+  - type: dropdown
+    id: auth-mode
+    attributes:
+      label: Authentication mode
+      options:
+        - API token
+        - Email / password (CE)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version
+      description: Output of `rustc --version` (only needed if you built from source).
+      placeholder: e.g. 1.96.1
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Automatically formatted as code — no backticks needed. Please redact bearer tokens and page contents.
+      render: shell
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed bearer tokens, passwords, and any confidential page content from this report.
+          required: true

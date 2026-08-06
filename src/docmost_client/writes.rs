@@ -221,7 +221,8 @@ impl super::DocmostClient {
         let result: CursorListResult<DocmostPageListItem> = self
             .request("/api/pages/sidebar-pages", payload, true)
             .await?;
-        Ok(into_page(result).items
+        Ok(into_page(result)
+            .items
             .into_iter()
             .filter(|p| Some(p.id.as_str()) != exclude_id)
             .filter_map(|p| p.position)

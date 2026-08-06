@@ -95,7 +95,9 @@ pub fn format_pagination<T>(page: &Page<T>, shown: usize, cap: usize, noun: &str
     }
     match (page.has_more, page.next_cursor.as_deref()) {
         (Some(true), Some(cursor)) => {
-            parts.push(format!("more available — pass cursor `{cursor}` to continue"));
+            parts.push(format!(
+                "more available — pass cursor `{cursor}` to continue"
+            ));
         }
         (Some(true), None) => parts.push("more available".to_string()),
         (Some(false), _) => parts.push("end of results".to_string()),

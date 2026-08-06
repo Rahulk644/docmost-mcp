@@ -134,7 +134,9 @@ async fn server_get_page_requires_slug_id_schema() -> Result<()> {
     assert!(properties.contains_key("slug_id"));
 
     let result = client
-        .call_tool(CallToolRequestParams::new("docmost_get_page").with_arguments(serde_json::Map::new()))
+        .call_tool(
+            CallToolRequestParams::new("docmost_get_page").with_arguments(serde_json::Map::new()),
+        )
         .await?;
     assert_eq!(result.is_error, Some(true));
     assert!(format!("{result:?}").contains("slug_id"));

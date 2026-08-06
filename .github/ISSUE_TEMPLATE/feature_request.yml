@@ -1,0 +1,46 @@
+name: Feature Request
+description: Suggest a capability or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Note: this server can only expose what the Docmost API supports. If you're
+        unsure whether an endpoint exists, file it anyway and say so — establishing
+        that is part of the work.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task you want an agent to accomplish, not the API call you think it needs.
+      placeholder: I want an agent to archive every page in a space that hasn't changed in a year.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: A new tool, a new argument on an existing one, or different output?
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: Relevant Docmost API endpoint
+      description: If you know it. Leave blank if not.
+      placeholder: e.g. POST /api/pages/move-to-space
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Which Docmost edition does this need?
+      options:
+        - Community (self-hosted)
+        - Enterprise
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Including whether the existing tools can already do this by composition.
