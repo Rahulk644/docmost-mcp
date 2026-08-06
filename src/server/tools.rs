@@ -11,9 +11,9 @@ use crate::{
         },
     },
     types::{
-        DocmostSearchResult, EmptyInput, GetCommentsInput, GetPageInput, GetSpaceInput,
-        ListChildPagesInput, ListPagesInput, ListWorkspaceMembersInput, ResponseFormat,
-        SearchDocsInput, StartupConfig,
+        AuthenticatedSession, DocmostSearchResult, EmptyInput, GetCommentsInput, GetPageInput,
+        GetSpaceInput, ListChildPagesInput, ListPagesInput, ListWorkspaceMembersInput,
+        ResponseFormat, SearchDocsInput, StartupConfig,
     },
 };
 
@@ -39,6 +39,15 @@ fn wants_json(format: Option<ResponseFormat>) -> bool {
 impl DocmostMcpServer {
     pub fn new(startup_config: StartupConfig) -> anyhow::Result<Self> {
         let auth_manager = AuthManager::new(startup_config, None)?;
+        Self::from_auth_manager(auth_manager)
+    }
+
+    pub fn new_with_session(session: AuthenticatedSession) -> anyhow::Result<Self> {
+        let auth_manager = AuthManager::from_session(session)?;
+        Self::from_auth_manager(auth_manager)
+    }
+
+    fn from_auth_manager(auth_manager: AuthManager) -> anyhow::Result<Self> {
         let client = crate::docmost_client::DocmostClient::new(auth_manager);
         Ok(Self {
             client,

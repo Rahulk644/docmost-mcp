@@ -3,6 +3,7 @@ pub mod auth;
 pub mod debug;
 pub mod docmost_client;
 pub mod http_server;
+pub mod oauth;
 pub mod position;
 pub mod prosemirror;
 pub mod server;

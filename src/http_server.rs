@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -6,17 +6,22 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{HeaderValue, StatusCode, header},
-    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde_json::json;
 use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
+use tower::ServiceExt;
 
-use crate::{server::DocmostMcpServer, types::StartupConfig};
+use crate::{
+    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState},
+    server::DocmostMcpServer,
+    types::{AuthenticatedSession, StartupConfig},
+};
 
 const MIN_BEARER_TOKEN_BYTES: usize = 32;
 
@@ -40,17 +45,24 @@ fn validate_bearer_token(token: &str) -> Result<()> {
     Ok(())
 }
 
+type McpService = StreamableHttpService<DocmostMcpServer, LocalSessionManager>;
+
 #[derive(Clone)]
-struct AuthState {
-    token: Arc<[u8]>,
+struct AppState {
+    admin_token: Option<Arc<[u8]>>,
+    admin_service: McpService,
+    user_services: Arc<RwLock<HashMap<String, McpService>>>,
+    mcp_config: StreamableHttpServerConfig,
+    oauth: Option<OAuthState>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HttpServerConfig {
     pub bind: SocketAddr,
-    pub bearer_token: String,
+    pub bearer_token: Option<String>,
     pub allowed_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
+    pub oauth: Option<OAuthConfig>,
 }
 
 impl HttpServerConfig {
@@ -59,8 +71,11 @@ impl HttpServerConfig {
             .parse()
             .with_context(|| format!("DOCMOST_MCP_BIND is not a valid socket address: {bind}"))?;
         let bearer_token = env::var("DOCMOST_MCP_BEARER_TOKEN")
-            .context("DOCMOST_MCP_BEARER_TOKEN is required for HTTP transport")?;
-        validate_bearer_token(&bearer_token)?;
+            .ok()
+            .filter(|token| !token.trim().is_empty());
+        if let Some(token) = &bearer_token {
+            validate_bearer_token(token)?;
+        }
 
         let default_hosts = match bind.ip() {
             address if address.is_loopback() => vec![
@@ -87,11 +102,33 @@ impl HttpServerConfig {
             bail!("DOCMOST_MCP_ALLOWED_ORIGINS must contain at least one origin");
         }
 
+        let account_auth_enabled = matches!(
+            env::var("DOCMOST_MCP_ACCOUNT_AUTH").ok().as_deref(),
+            Some("1") | Some("true")
+        );
+        let oauth = if account_auth_enabled {
+            Some(OAuthConfig {
+                public_url: env::var("DOCMOST_MCP_PUBLIC_URL")
+                    .context("DOCMOST_MCP_PUBLIC_URL is required for account authentication")?,
+                docmost_base_url: env::var("DOCMOST_BASE_URL")
+                    .context("DOCMOST_BASE_URL is required for account authentication")?,
+                brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
+            })
+        } else {
+            None
+        };
+        if bearer_token.is_none() && oauth.is_none() {
+            bail!(
+                "Set DOCMOST_MCP_BEARER_TOKEN or enable per-account auth with DOCMOST_MCP_ACCOUNT_AUTH=true"
+            );
+        }
+
         Ok(Self {
             bind,
             bearer_token,
             allowed_hosts,
             allowed_origins,
+            oauth,
         })
     }
 }
@@ -109,7 +146,7 @@ fn comma_separated_env(name: &str) -> Option<Vec<String>> {
 
 pub async fn serve_http(startup_config: StartupConfig, config: HttpServerConfig) -> Result<()> {
     let bind = config.bind;
-    let app = build_router(startup_config, config);
+    let app = build_router(startup_config, config)?;
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -121,61 +158,115 @@ pub async fn serve_http(startup_config: StartupConfig, config: HttpServerConfig)
         .context("Docmost MCP HTTP server stopped unexpectedly")
 }
 
-fn build_router(startup_config: StartupConfig, config: HttpServerConfig) -> Router {
+fn build_router(startup_config: StartupConfig, config: HttpServerConfig) -> Result<Router> {
     let mcp_config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(config.allowed_hosts)
         .with_allowed_origins(config.allowed_origins);
-    let service = StreamableHttpService::new(
+    let admin_service = StreamableHttpService::new(
         move || DocmostMcpServer::new(startup_config.clone()).map_err(std::io::Error::other),
         LocalSessionManager::default().into(),
-        mcp_config,
+        mcp_config.clone(),
     );
+    let oauth = config.oauth.map(OAuthState::new).transpose()?;
+    let state = AppState {
+        admin_token: config
+            .bearer_token
+            .map(|token| Arc::from(token.into_bytes())),
+        admin_service,
+        user_services: Arc::new(RwLock::new(HashMap::new())),
+        mcp_config,
+        oauth: oauth.clone(),
+    };
 
-    let protected_mcp =
-        Router::new()
-            .nest_service("/mcp", service)
-            .route_layer(middleware::from_fn_with_state(
-                AuthState {
-                    token: Arc::from(config.bearer_token.into_bytes()),
-                },
-                require_bearer,
-            ));
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
-        .merge(protected_mcp)
+        .route("/mcp", any(handle_mcp))
+        .route("/mcp/", any(handle_mcp))
+        .with_state(state);
+    if let Some(oauth) = oauth {
+        router = router.merge(oauth.routes());
+    }
+    Ok(router)
 }
 
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok", "service": "docmost-mcp" }))
 }
 
-async fn require_bearer(
-    State(state): State<AuthState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+async fn handle_mcp(State(state): State<AppState>, request: Request<Body>) -> Response {
     let supplied = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
 
-    let authenticated = supplied.is_some_and(|value| {
-        let supplied = value.as_bytes();
-        supplied.len() == state.token.len() && supplied.ct_eq(state.token.as_ref()).into()
+    let admin_authenticated = supplied.is_some_and(|value| {
+        state.admin_token.as_ref().is_some_and(|expected| {
+            let supplied = value.as_bytes();
+            supplied.len() == expected.len() && supplied.ct_eq(expected.as_ref()).into()
+        })
     });
-    if authenticated {
-        return next.run(request).await;
+    if admin_authenticated {
+        return call_mcp_service(state.admin_service, request).await;
     }
 
+    if let (Some(oauth), Some(token)) = (&state.oauth, supplied)
+        && let Some(session) = oauth.access_session(token).await
+    {
+        let key = OAuthState::session_fingerprint(&session);
+        let active_sessions = oauth.active_session_fingerprints().await;
+        let service = {
+            let mut services = state.user_services.write().await;
+            services.retain(|fingerprint, _| active_sessions.contains(fingerprint));
+            services
+                .entry(key)
+                .or_insert_with(|| user_mcp_service(session, state.mcp_config.clone()))
+                .clone()
+        };
+        return call_mcp_service(service, request).await;
+    }
+
+    unauthorized(&state)
+}
+
+fn user_mcp_service(
+    session: AuthenticatedSession,
+    config: StreamableHttpServerConfig,
+) -> McpService {
+    StreamableHttpService::new(
+        move || DocmostMcpServer::new_with_session(session.clone()).map_err(std::io::Error::other),
+        LocalSessionManager::default().into(),
+        config,
+    )
+}
+
+async fn call_mcp_service(service: McpService, request: Request<Body>) -> Response {
+    match service.oneshot(request).await {
+        Ok(response) => response.map(Body::new),
+        Err(error) => match error {},
+    }
+}
+
+fn unauthorized(state: &AppState) -> Response {
     let mut response = (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": "invalid or missing bearer token" })),
     )
         .into_response();
-    response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    let challenge = state.oauth.as_ref().map_or_else(
+        || "Bearer".to_string(),
+        |oauth| {
+            format!(
+                "Bearer resource_metadata=\"{}\"",
+                oauth.resource_metadata_url()
+            )
+        },
+    );
+    if let Ok(value) = HeaderValue::from_str(&challenge) {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
+    }
     response
 }
 
@@ -216,11 +307,12 @@ mod tests {
             StartupConfig::default(),
             HttpServerConfig {
                 bind: address,
-                bearer_token: token.to_string(),
+                bearer_token: Some(token.to_string()),
                 allowed_hosts: vec![address.to_string()],
                 allowed_origins: vec![format!("http://{address}")],
+                oauth: None,
             },
-        );
+        )?;
         let task = tokio::spawn(async move { axum::serve(listener, app).await });
         let client = reqwest::Client::new();
         let endpoint = format!("http://{address}/mcp");

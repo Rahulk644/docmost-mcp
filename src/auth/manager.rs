@@ -35,6 +35,7 @@ static AUTH_TOKEN_RE: Lazy<Regex> =
 pub struct AuthManager {
     store: Arc<StateStore>,
     configured_base_url: Option<String>,
+    fixed_session: Option<AuthenticatedSession>,
     interactive_auth: bool,
     http: Client,
 }
@@ -44,6 +45,10 @@ impl fmt::Debug for AuthManager {
         formatter
             .debug_struct("AuthManager")
             .field("configured_base_url", &self.configured_base_url)
+            .field(
+                "fixed_session",
+                &self.fixed_session.as_ref().map(|session| &session.email),
+            )
             .field("interactive_auth", &self.interactive_auth)
             .field("credentials", &"<redacted>")
             .finish_non_exhaustive()
@@ -54,13 +59,46 @@ impl AuthManager {
     pub fn new(options: StartupConfig, base_dir: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             configured_base_url: options.base_url.as_deref().map(normalize_base_url),
+            fixed_session: None,
             interactive_auth: options.interactive_auth,
             store: Arc::new(StateStore::new(base_dir)?),
             http: Client::builder().build()?,
         })
     }
 
+    /// Build a non-persistent manager for an already-authenticated remote user.
+    ///
+    /// The session token is held only in memory. There are deliberately no saved
+    /// credentials to fall back to, so a Docmost 401 or expiry requires the user
+    /// to complete the account login flow again.
+    pub fn from_session(session: AuthenticatedSession) -> Result<Self> {
+        Ok(Self {
+            configured_base_url: Some(normalize_base_url(&session.base_url)),
+            fixed_session: Some(session),
+            interactive_auth: false,
+            store: Arc::new(StateStore::new(None)?),
+            http: Client::builder().build()?,
+        })
+    }
+
+    /// Validate Docmost email/password credentials without writing either the
+    /// password or resulting session to disk.
+    pub async fn authenticate_once(input: LoginInput) -> Result<AuthenticatedSession> {
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        exchange_credentials(&http, &input).await
+    }
+
     pub async fn get_authenticated_session(&self) -> Result<AuthenticatedSession> {
+        if let Some(session) = &self.fixed_session {
+            if authenticated_session_is_expiring(session) {
+                return Err(anyhow!(
+                    "Docmost session expired; authenticate this MCP account again."
+                ));
+            }
+            return Ok(session.clone());
+        }
         if let Some(session) = self.configured_api_token_session()? {
             return Ok(session);
         }
@@ -100,6 +138,11 @@ impl AuthManager {
     }
 
     pub async fn reauthenticate(&self) -> Result<AuthenticatedSession> {
+        if self.fixed_session.is_some() {
+            return Err(anyhow!(
+                "Docmost rejected this account session; authenticate this MCP account again."
+            ));
+        }
         if let Some(session) = self.configured_api_token_session()? {
             return Ok(session);
         }
@@ -172,60 +215,20 @@ impl AuthManager {
         input: LoginInput,
         persist_credentials: bool,
     ) -> Result<AuthenticatedSession> {
-        let base_url = normalize_base_url(&input.base_url);
-        debug_log(
-            "auth",
-            "Starting Docmost login",
-            Some(&serde_json::json!({ "baseUrl": base_url, "email": input.email })),
-        );
-
-        let response = self
-            .http
-            .post(format!("{base_url}/api/auth/login"))
-            .json(&serde_json::json!({
-                "email": input.email,
-                "password": input.password
-            }))
-            .send()
-            .await
-            .context("Failed to call the Docmost login endpoint")?;
-
-        debug_log(
-            "auth",
-            "Docmost login response received",
-            Some(&serde_json::json!({
-                "status": response.status().as_u16(),
-                "ok": response.status().is_success()
-            })),
-        );
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let details = safe_read_response_text(response).await;
-            return Err(anyhow!(
-                format!("Docmost login failed ({}). {}", status, details)
-                    .trim()
-                    .to_string()
-            ));
-        }
-
-        let token = read_auth_token_from_headers(response.headers()).ok_or_else(|| {
-            anyhow!("Docmost login succeeded but no authToken cookie was returned.")
-        })?;
-        let expires_at = get_jwt_expiry_iso(&token);
+        let session = exchange_credentials(&self.http, &input).await?;
         let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
         self.store
             .write_config(&StoredConfig {
-                base_url: base_url.clone(),
+                base_url: session.base_url.clone(),
                 email: input.email.clone(),
                 last_authenticated_at: now.clone(),
             })
             .await?;
         self.store
             .write_session(&StoredSession {
-                token: token.clone(),
-                expires_at: expires_at.clone(),
+                token: session.token.clone(),
+                expires_at: session.expires_at.clone(),
                 saved_at: now.clone(),
             })
             .await?;
@@ -238,12 +241,7 @@ impl AuthManager {
                 .await?;
         }
 
-        Ok(AuthenticatedSession {
-            base_url,
-            email: input.email,
-            token,
-            expires_at,
-        })
+        Ok(session)
     }
 
     fn configured_api_token_session(&self) -> Result<Option<AuthenticatedSession>> {
@@ -370,6 +368,63 @@ fn is_session_expiring(session: &StoredSession) -> bool {
     };
 
     expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+}
+
+fn authenticated_session_is_expiring(session: &AuthenticatedSession) -> bool {
+    let Some(expires_at) = &session.expires_at else {
+        return false;
+    };
+    let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
+        return false;
+    };
+    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+}
+
+async fn exchange_credentials(http: &Client, input: &LoginInput) -> Result<AuthenticatedSession> {
+    let base_url = normalize_base_url(&input.base_url);
+    debug_log(
+        "auth",
+        "Starting Docmost login",
+        Some(&serde_json::json!({ "baseUrl": base_url, "email": input.email })),
+    );
+
+    let response = http
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": input.email,
+            "password": input.password
+        }))
+        .send()
+        .await
+        .context("Failed to call the Docmost login endpoint")?;
+
+    debug_log(
+        "auth",
+        "Docmost login response received",
+        Some(&serde_json::json!({
+            "status": response.status().as_u16(),
+            "ok": response.status().is_success()
+        })),
+    );
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let details = safe_read_response_text(response).await;
+        return Err(anyhow!(
+            format!("Docmost login failed ({}). {}", status, details)
+                .trim()
+                .to_string()
+        ));
+    }
+
+    let token = read_auth_token_from_headers(response.headers())
+        .ok_or_else(|| anyhow!("Docmost login succeeded but no authToken cookie was returned."))?;
+    Ok(AuthenticatedSession {
+        base_url,
+        email: input.email.clone(),
+        expires_at: get_jwt_expiry_iso(&token),
+        token,
+    })
 }
 
 pub fn read_auth_token_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
