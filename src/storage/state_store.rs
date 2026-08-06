@@ -14,6 +14,9 @@ use crate::{
     types::{StoredConfig, StoredCredentials, StoredSession},
 };
 
+// Retained from before the crate was renamed to docmost-mcp. Do NOT "fix" this:
+// it is the on-disk state directory, so changing it strands existing sessions
+// and audit logs at the old path.
 const DEFAULT_DIRNAME: &str = ".docmost-local-mcp";
 
 #[derive(Debug, Clone)]

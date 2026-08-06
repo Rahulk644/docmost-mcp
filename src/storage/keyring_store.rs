@@ -2,6 +2,9 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::types::StoredCredentials;
 
+// Retained from before the crate was renamed to docmost-mcp. Do NOT "fix" this:
+// it is the OS keychain service name, so changing it orphans every credential
+// already stored under the old key and silently forces users to re-authenticate.
 const KEYRING_SERVICE: &str = "docmost-local-mcp";
 const KEYRING_USERNAME: &str = "credentials";
 

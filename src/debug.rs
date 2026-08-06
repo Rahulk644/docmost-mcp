@@ -10,7 +10,7 @@ where
     }
 
     let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let prefix = format!("[docmost-local-mcp][{timestamp}][{scope}]");
+    let prefix = format!("[docmost-mcp][{timestamp}][{scope}]");
 
     match details {
         Some(details) => {

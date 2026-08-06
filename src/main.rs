@@ -9,7 +9,7 @@ use docmost_mcp::{
 use rmcp::{ServiceExt, transport::io::stdio};
 
 #[derive(Parser, Debug)]
-#[command(name = "docmost-local-mcp")]
+#[command(name = "docmost-mcp")]
 #[command(about = "Docmost MCP server for local IDE integrations")]
 struct Cli {
     #[arg(long, env = "DOCMOST_BASE_URL")]
