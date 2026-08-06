@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use docmost_local_mcp::startup_config::{normalize_base_url, parse_startup_config};
+use docmost_mcp::startup_config::{normalize_base_url, parse_startup_config};
 
 #[test]
 fn reads_base_url_from_cli_arguments() {

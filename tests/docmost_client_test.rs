@@ -1,4 +1,4 @@
-use docmost_local_mcp::docmost_client::{
+use docmost_mcp::docmost_client::{
     CursorListResult, ListResult, PaginationMeta, into_page, normalize_list_result,
 };
 

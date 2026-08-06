@@ -430,7 +430,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "docmost-local-mcp"
+name = "docmost-mcp"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",

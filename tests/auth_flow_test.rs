@@ -15,7 +15,7 @@ use axum::{
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use docmost_local_mcp::{
+use docmost_mcp::{
     auth::manager::{AuthManager, get_jwt_expiry_iso, read_auth_token_from_headers},
     docmost_client::DocmostClient,
     startup_config::normalize_base_url,

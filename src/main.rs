@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use docmost_local_mcp::{
+use docmost_mcp::{
     http_server::{HttpServerConfig, serve_http},
     server::DocmostMcpServer,
     startup_config::normalize_base_url,

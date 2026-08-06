@@ -1,5 +1,5 @@
 use anyhow::Result;
-use docmost_local_mcp::{server::DocmostMcpServer, types::StartupConfig};
+use docmost_mcp::{server::DocmostMcpServer, types::StartupConfig};
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{CallToolRequestParams, ClientInfo},

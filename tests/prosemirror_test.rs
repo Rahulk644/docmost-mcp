@@ -1,4 +1,4 @@
-use docmost_local_mcp::prosemirror::{markdown_to_prosemirror, prosemirror_to_markdown};
+use docmost_mcp::prosemirror::{markdown_to_prosemirror, prosemirror_to_markdown};
 use serde_json::{Value, json};
 
 #[test]

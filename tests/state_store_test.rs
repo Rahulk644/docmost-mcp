@@ -1,4 +1,4 @@
-use docmost_local_mcp::{
+use docmost_mcp::{
     storage::state_store::StateStore,
     types::{StoredConfig, StoredCredentials, StoredSession},
 };

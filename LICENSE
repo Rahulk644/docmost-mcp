@@ -1,6 +1,11 @@
 MIT License
 
-Copyright (c) 2026
+Copyright (c) 2026 Rahul Khatri
+
+Portions of this software are derived from docmost-local-mcp
+(https://github.com/wisflux/docmost-local-mcp), Copyright (c) its contributors,
+used under the MIT License. See UPSTREAM.md for the exact upstream commit and the
+scope of subsequent changes.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

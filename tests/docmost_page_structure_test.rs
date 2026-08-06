@@ -8,7 +8,7 @@ use std::sync::{
 
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::post};
-use docmost_local_mcp::{
+use docmost_mcp::{
     docmost_client::DocmostClient,
     startup_config::normalize_base_url,
     storage::state_store::StateStore,
@@ -66,7 +66,7 @@ async fn spawn(temp: &TempDir) -> Result<(DocmostClient, Captured)> {
         })
         .await?;
 
-    let auth_manager = docmost_local_mcp::auth::manager::AuthManager::new(
+    let auth_manager = docmost_mcp::auth::manager::AuthManager::new(
         StartupConfig {
             base_url: Some(base_url.clone()),
             interactive_auth: false,
@@ -381,7 +381,7 @@ async fn create_comment_sends_content_as_json_string() -> Result<()> {
     let temp = TempDir::new()?;
     let (client, state) = spawn(&temp).await?;
 
-    let content = docmost_local_mcp::prosemirror::markdown_to_prosemirror("Nice **work**");
+    let content = docmost_mcp::prosemirror::markdown_to_prosemirror("Nice **work**");
     let comment = client.create_comment("page-1", &content).await?;
     assert_eq!(comment.id, "comment-1");
 
@@ -406,7 +406,7 @@ async fn update_comment_sends_comment_id_and_stringified_content() -> Result<()>
     let temp = TempDir::new()?;
     let (client, state) = spawn(&temp).await?;
 
-    let content = docmost_local_mcp::prosemirror::markdown_to_prosemirror("Edited");
+    let content = docmost_mcp::prosemirror::markdown_to_prosemirror("Edited");
     client.update_comment("comment-1", &content).await?;
 
     let body = last(&state, "comment-update");

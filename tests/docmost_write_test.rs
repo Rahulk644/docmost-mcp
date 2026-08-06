@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::SET_COOKIE},
     routing::post,
 };
-use docmost_local_mcp::{
+use docmost_mcp::{
     docmost_client::DocmostClient,
     prosemirror::markdown_to_prosemirror,
     startup_config::normalize_base_url,
@@ -98,7 +98,7 @@ async fn spawn(temp: &TempDir) -> Result<(DocmostClient, CapturedState, String)>
         })
         .await?;
 
-    let auth_manager = docmost_local_mcp::auth::manager::AuthManager::new(
+    let auth_manager = docmost_mcp::auth::manager::AuthManager::new(
         StartupConfig {
             base_url: Some(base_url.clone()),
             interactive_auth: false,

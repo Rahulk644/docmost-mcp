@@ -1,10 +1,10 @@
 [package]
-name = "docmost-local-mcp"
+name = "docmost-mcp"
 version = "1.0.0"
 edition = "2024"
 description = "Hardened Docmost MCP server with authenticated Streamable HTTP"
 license = "MIT"
-repository = "https://github.com/wisflux/docmost-local-mcp"
+repository = "https://github.com/Rahulk644/docmost-mcp"
 
 [features]
 default = []
