@@ -12,7 +12,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --home-dir /var/lib/docmost-mcp --uid 10001 docmost-mcp
-COPY --from=builder /build/target/release/docmost-local-mcp /usr/local/bin/docmost-mcp
+COPY --from=builder /build/target/release/docmost-mcp /usr/local/bin/docmost-mcp
 USER 10001:10001
 ENV DOCMOST_MCP_BIND=0.0.0.0:8787
 EXPOSE 8787
