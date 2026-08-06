@@ -66,6 +66,29 @@ pub fn format_search_results(query: &str, results: &[DocmostSearchResult]) -> St
     lines.join("\n")
 }
 
+/// JSON body for a paginated list.
+///
+/// The Markdown renderers deliberately truncate and summarise; this returns the
+/// complete records plus an explicit `pagination` block, so a caller that
+/// post-processes results gets the cursor as data rather than having to parse it
+/// out of a prose footer.
+pub fn page_to_json<T: serde::Serialize>(page: &Page<T>) -> serde_json::Value {
+    serde_json::json!({
+        "items": page.items,
+        "count": page.items.len(),
+        "pagination": {
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+            "total": page.total,
+        }
+    })
+}
+
+/// JSON body for a non-paginated list (search results, spaces).
+pub fn list_to_json<T: serde::Serialize>(items: &[T]) -> serde_json::Value {
+    serde_json::json!({ "items": items, "count": items.len() })
+}
+
 /// How many items these renderers show before truncating.
 const DISPLAY_CAP: usize = 10;
 /// Members render wider rows, so this list shows more before truncating.
@@ -299,6 +322,78 @@ mod tests {
 
     fn page(value: serde_json::Value) -> DocmostPage {
         serde_json::from_value(value).expect("valid DocmostPage")
+    }
+
+    fn sample_page(items: Vec<i32>, next: Option<&str>, more: Option<bool>) -> Page<i32> {
+        Page {
+            items,
+            next_cursor: next.map(str::to_string),
+            total: Some(57),
+            has_more: more,
+        }
+    }
+
+    #[test]
+    fn page_json_exposes_pagination_as_data() {
+        // The Markdown footer states the cursor in prose; a JSON caller must get it
+        // as a field rather than having to parse it back out of the text.
+        let value = page_to_json(&sample_page(vec![1, 2], Some("cur-2"), Some(true)));
+        assert_eq!(value["items"], json!([1, 2]));
+        assert_eq!(value["count"], json!(2));
+        assert_eq!(value["pagination"]["next_cursor"], json!("cur-2"));
+        assert_eq!(value["pagination"]["has_more"], json!(true));
+        assert_eq!(value["pagination"]["total"], json!(57));
+    }
+
+    #[test]
+    fn page_json_reports_unknown_has_more_as_null() {
+        // Must serialize as null, not false — "we don't know" and "there is no more"
+        // are different answers, and collapsing them would make a caller stop early.
+        let value = page_to_json(&sample_page(vec![1], None, None));
+        assert!(value["pagination"]["has_more"].is_null());
+        assert!(value["pagination"]["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn list_json_has_items_and_count() {
+        let value = list_to_json(&[10, 20, 30]);
+        assert_eq!(value["items"], json!([10, 20, 30]));
+        assert_eq!(value["count"], json!(3));
+    }
+
+    #[test]
+    fn markdown_footer_names_the_cursor_to_continue() {
+        let out = format_pagination(
+            &sample_page(vec![1, 2], Some("cur-9"), Some(true)),
+            2,
+            10,
+            "pages",
+        );
+        assert!(out.contains("cur-9"), "footer must name the cursor: {out}");
+        assert!(
+            out.contains("57 total"),
+            "footer must state the total: {out}"
+        );
+    }
+
+    #[test]
+    fn markdown_footer_states_end_of_results() {
+        let out = format_pagination(&sample_page(vec![1], None, Some(false)), 1, 10, "pages");
+        assert!(out.contains("end of results"), "output: {out}");
+    }
+
+    #[test]
+    fn markdown_footer_flags_the_display_cap() {
+        // 25 fetched but only 10 shown — the agent must be told, or it will believe
+        // it has seen everything that was fetched.
+        let out = format_pagination(
+            &sample_page((1..=25).collect(), None, None),
+            10,
+            10,
+            "pages",
+        );
+        assert!(out.contains("display cap 10"), "output: {out}");
+        assert!(out.contains("of 25"), "output: {out}");
     }
 
     #[test]

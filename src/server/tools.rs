@@ -7,15 +7,34 @@ use crate::{
         DocmostMcpServer, internal_error,
         render::{
             format_comments, format_current_user, format_page_list, format_search_results,
-            format_workspace_members,
+            format_workspace_members, list_to_json, page_to_json,
         },
     },
     types::{
         DocmostSearchResult, EmptyInput, GetCommentsInput, GetPageInput, GetSpaceInput,
-        ListChildPagesInput, ListPagesInput, ListWorkspaceMembersInput, SearchDocsInput,
-        StartupConfig,
+        ListChildPagesInput, ListPagesInput, ListWorkspaceMembersInput, ResponseFormat,
+        SearchDocsInput, StartupConfig,
     },
 };
+
+/// Serialize a value as the `json` response format.
+///
+/// Kept in one place so every tool emits the same shape and the same failure
+/// message; a serialization failure here is a bug in our own models, not a
+/// Docmost error, and says so.
+fn as_json<T: serde::Serialize>(value: &T) -> Result<String, ErrorData> {
+    serde_json::to_string_pretty(value).map_err(|error| {
+        ErrorData::internal_error(
+            format!("Could not serialize the response as JSON: {error}"),
+            None,
+        )
+    })
+}
+
+/// True when the caller asked for JSON. Markdown is the default everywhere.
+fn wants_json(format: Option<ResponseFormat>) -> bool {
+    format.unwrap_or_default().is_json()
+}
 
 impl DocmostMcpServer {
     pub fn new(startup_config: StartupConfig) -> anyhow::Result<Self> {
@@ -53,9 +72,13 @@ impl DocmostMcpServer {
     )]
     async fn list_spaces(
         &self,
-        Parameters(_): Parameters<EmptyInput>,
+        Parameters(input): Parameters<EmptyInput>,
     ) -> Result<String, ErrorData> {
         let spaces = self.client.list_spaces().await.map_err(internal_error)?;
+
+        if wants_json(input.response_format) {
+            return as_json(&list_to_json(&spaces));
+        }
 
         if spaces.is_empty() {
             return Ok("No Docmost spaces were found.".to_string());
@@ -85,7 +108,7 @@ impl DocmostMcpServer {
 
     #[tool(
         name = "docmost_search_docs",
-        description = "Search Docmost documentation and optionally filter results by a space ID from list_spaces.",
+        description = "Search Docmost documentation and optionally filter results by a space ID from docmost_list_spaces.",
         annotations(title = "Search Docmost", read_only_hint = true)
     )]
     async fn search_docs(
@@ -93,12 +116,15 @@ impl DocmostMcpServer {
         Parameters(input): Parameters<SearchDocsInput>,
     ) -> Result<String, ErrorData> {
         let results = self.search_pages_results(&input).await?;
+        if wants_json(input.response_format) {
+            return as_json(&list_to_json(&results));
+        }
         Ok(format_search_results(&input.query, &results))
     }
 
     #[tool(
         name = "docmost_search_pages",
-        description = "Search Docmost pages and optionally filter results by a space ID from list_spaces.",
+        description = "Search Docmost pages and optionally filter results by a space ID from docmost_list_spaces.",
         annotations(title = "Search Docmost Pages", read_only_hint = true)
     )]
     async fn search_pages(
@@ -106,6 +132,9 @@ impl DocmostMcpServer {
         Parameters(input): Parameters<SearchDocsInput>,
     ) -> Result<String, ErrorData> {
         let results = self.search_pages_results(&input).await?;
+        if wants_json(input.response_format) {
+            return as_json(&list_to_json(&results));
+        }
         Ok(format_search_results(&input.query, &results))
     }
 
@@ -123,6 +152,10 @@ impl DocmostMcpServer {
             .get_space(&input.space_id)
             .await
             .map_err(internal_error)?;
+
+        if wants_json(input.response_format) {
+            return as_json(&space);
+        }
 
         let name = space.name.as_deref().unwrap_or("Untitled");
         let lines = [
@@ -184,6 +217,14 @@ impl DocmostMcpServer {
             .as_ref()
             .map(prosemirror_to_markdown)
             .unwrap_or_default();
+
+        if wants_json(input.response_format) {
+            // Include the converted body: callers asking for JSON still want the
+            // content, and re-deriving it from ProseMirror on their side would
+            // duplicate this server's only real transformation.
+            return as_json(&serde_json::json!({ "page": page, "markdown": markdown }));
+        }
+
         let title = match page.icon.as_deref() {
             Some(icon) if !icon.is_empty() => {
                 format!("# {icon} {}", page.title.as_deref().unwrap_or("Untitled"))
@@ -245,6 +286,9 @@ impl DocmostMcpServer {
             .list_pages(&input.space_id, input.limit, input.cursor.as_deref())
             .await
             .map_err(internal_error)?;
+        if wants_json(input.response_format) {
+            return as_json(&page_to_json(&pages));
+        }
         Ok(format_page_list(
             "Recent Pages",
             &format!("space `{}`", input.space_id),
@@ -266,6 +310,9 @@ impl DocmostMcpServer {
             .list_child_pages(&input.page_id, input.limit, input.cursor.as_deref())
             .await
             .map_err(internal_error)?;
+        if wants_json(input.response_format) {
+            return as_json(&page_to_json(&pages));
+        }
         Ok(format_page_list(
             "Child Pages",
             &format!("page `{}`", input.page_id),
@@ -287,6 +334,9 @@ impl DocmostMcpServer {
             .get_comments(&input.page_id, input.limit, input.cursor.as_deref())
             .await
             .map_err(internal_error)?;
+        if wants_json(input.response_format) {
+            return as_json(&page_to_json(&comments));
+        }
         Ok(format_comments(&input.page_id, &comments))
     }
 
@@ -309,6 +359,9 @@ impl DocmostMcpServer {
             )
             .await
             .map_err(internal_error)?;
+        if wants_json(input.response_format) {
+            return as_json(&page_to_json(&members));
+        }
         Ok(format_workspace_members(&members))
     }
 
@@ -319,13 +372,17 @@ impl DocmostMcpServer {
     )]
     async fn get_current_user(
         &self,
-        Parameters(_): Parameters<EmptyInput>,
+        Parameters(input): Parameters<EmptyInput>,
     ) -> Result<String, ErrorData> {
         let response = self
             .client
             .get_current_user()
             .await
             .map_err(internal_error)?;
+
+        if wants_json(input.response_format) {
+            return as_json(&response);
+        }
 
         Ok(format_current_user(&response))
     }

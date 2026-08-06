@@ -4,8 +4,39 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// Output format for tools that return data.
+///
+/// Markdown is the default because it is what an agent reads back to a human and
+/// it costs far fewer tokens than the full record. `json` returns every field the
+/// API gave us — plus explicit pagination metadata — for callers that post-process
+/// the result rather than summarise it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseFormat {
+    /// Condensed, human-readable Markdown.
+    #[default]
+    Markdown,
+    /// Complete records as JSON, with a `pagination` block on list results.
+    Json,
+}
+
+impl ResponseFormat {
+    pub fn is_json(self) -> bool {
+        matches!(self, ResponseFormat::Json)
+    }
+}
+
+/// Shared `response_format` description, so every tool documents it identically.
+pub const RESPONSE_FORMAT_DESC: &str = "Output format: `markdown` (default, condensed and human-readable) or `json` \
+     (complete records plus pagination metadata).";
+
+/// Input for tools that take no arguments beyond the output format.
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
-pub struct EmptyInput {}
+pub struct EmptyInput {
+    #[serde(default)]
+    #[schemars(description = "Output format: `markdown` (default) or `json`.")]
+    pub response_format: Option<ResponseFormat>,
+}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SearchDocsInput {
@@ -14,18 +45,29 @@ pub struct SearchDocsInput {
     #[serde(default)]
     #[schemars(description = "Optional Docmost space ID to scope the search.")]
     pub space_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GetSpaceInput {
     #[schemars(description = "The Docmost space ID.")]
     pub space_id: String,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GetPageInput {
-    #[schemars(description = "The page slug ID returned from search_docs.")]
+    #[schemars(
+        description = "The page slug ID returned from docmost_search_docs or docmost_search_pages."
+    )]
     pub slug_id: String,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -38,6 +80,9 @@ pub struct ListPagesInput {
     #[serde(default)]
     #[schemars(description = "Optional cursor returned by a previous list call.")]
     pub cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -50,6 +95,9 @@ pub struct ListChildPagesInput {
     #[serde(default)]
     #[schemars(description = "Optional cursor returned by a previous list call.")]
     pub cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -62,6 +110,9 @@ pub struct GetCommentsInput {
     #[serde(default)]
     #[schemars(description = "Optional cursor returned by a previous list call.")]
     pub cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -157,6 +208,9 @@ pub struct ListWorkspaceMembersInput {
     #[serde(default)]
     #[schemars(description = "Optional admin view flag, when supported by the workspace.")]
     pub admin_view: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = RESPONSE_FORMAT_DESC)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
