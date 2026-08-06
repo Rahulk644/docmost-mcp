@@ -37,11 +37,21 @@ const MAX_COMPLETED_AUTHORIZATIONS: usize = 4_096;
 const MAX_ACCESS_GRANTS: usize = 8_192;
 const MAX_REFRESH_GRANTS: usize = 4_096;
 const DEFAULT_SCOPE: &str = "docmost";
+/// Product name on the sign-in pages when the operator sets no `DOCMOST_MCP_BRAND`.
+pub const DEFAULT_BRAND: &str = "Docmost";
+const MAX_BRAND_LENGTH: usize = 60;
+/// Shown in place of a client's name when it registered without one. The pages
+/// must never name a specific MCP client: Claude Code, Claude Desktop, Codex and
+/// Cursor all speak this protocol, and the user is looking at whichever they used.
+const UNNAMED_CLIENT: &str = "your MCP client";
 
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     pub public_url: String,
     pub docmost_base_url: String,
+    /// Product name shown on the sign-in and authorized pages. Deployments that
+    /// rebrand Docmost set `DOCMOST_MCP_BRAND`; everyone else gets `DEFAULT_BRAND`.
+    pub brand: String,
 }
 
 #[derive(Clone)]
@@ -53,6 +63,7 @@ struct OAuthInner {
     public_url: String,
     resource_url: String,
     docmost_base_url: String,
+    brand: String,
     clients: RwLock<HashMap<String, RegisteredClient>>,
     pending: RwLock<HashMap<String, PendingAuthorization>>,
     completed: RwLock<HashMap<String, CompletedAuthorization>>,
@@ -65,11 +76,15 @@ struct OAuthInner {
 #[derive(Clone)]
 struct RegisteredClient {
     redirect_uris: Vec<String>,
+    /// Self-declared at registration, so it is untrusted input and is always
+    /// escaped before it reaches a page.
+    client_name: Option<String>,
 }
 
 #[derive(Clone)]
 struct PendingAuthorization {
     client_id: String,
+    client_name: Option<String>,
     redirect_uri: String,
     state: Option<String>,
     code_challenge: String,
@@ -81,6 +96,9 @@ struct PendingAuthorization {
 #[derive(Clone)]
 struct CompletedAuthorization {
     location: String,
+    /// Carried so a refreshed browser replays the same page it saw the first
+    /// time, naming the same client.
+    client_name: Option<String>,
     expires_at: DateTime<Utc>,
 }
 
@@ -172,6 +190,7 @@ impl OAuthState {
                 resource_url: format!("{public_url}/mcp"),
                 public_url,
                 docmost_base_url: normalize_base_url(&config.docmost_base_url),
+                brand: normalize_brand(&config.brand),
                 clients: RwLock::new(HashMap::new()),
                 pending: RwLock::new(HashMap::new()),
                 completed: RwLock::new(HashMap::new()),
@@ -313,6 +332,12 @@ async fn register_client(
     let issued_at = Utc::now().timestamp();
     let client = RegisteredClient {
         redirect_uris: request.redirect_uris.clone(),
+        client_name: request
+            .client_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
     };
     clients.insert(client_id.clone(), client);
     drop(clients);
@@ -361,7 +386,7 @@ async fn authorize(
         .await
         .insert(request_id.clone(), pending);
 
-    let html = render_login_page(&request_id, &csrf, None);
+    let html = render_login_page(&request_id, &csrf, None, &state.inner.brand);
     let cookie = format!(
         "mcp_auth_csrf={csrf}; Path=/oauth/authorize; Max-Age=600; HttpOnly; Secure; SameSite=Strict"
     );
@@ -394,7 +419,11 @@ async fn complete_authorization(
             .get(&form.request_id)
             .cloned();
         if let Some(completed) = completed.filter(|grant| grant.expires_at > Utc::now()) {
-            return authorization_response(&completed.location);
+            return authorization_response(
+                &completed.location,
+                &state.inner.brand,
+                completed.client_name.as_deref(),
+            );
         }
         return oauth_html_error(
             StatusCode::BAD_REQUEST,
@@ -447,6 +476,7 @@ async fn complete_authorization(
                         &form.request_id,
                         &form.csrf,
                         Some("Email or password was not accepted by Docmost."),
+                        &state.inner.brand,
                     )),
                 )
                     .into_response(),
@@ -484,19 +514,24 @@ async fn complete_authorization(
         form.request_id.clone(),
         CompletedAuthorization {
             location: location.clone(),
+            client_name: pending.client_name.clone(),
             expires_at,
         },
     );
     state.inner.pending.write().await.remove(&form.request_id);
 
-    authorization_response(&location)
+    authorization_response(
+        &location,
+        &state.inner.brand,
+        pending.client_name.as_deref(),
+    )
 }
 
-fn authorization_response(location: &str) -> Response {
+fn authorization_response(location: &str, brand: &str, client_name: Option<&str>) -> Response {
     let uses_loopback_callback = Url::parse(location)
         .is_ok_and(|url| url.scheme() == "http" && is_loopback_host(url.host_str()));
     if uses_loopback_callback {
-        return authorization_loopback_bridge(location);
+        return authorization_loopback_bridge(location, brand, client_name);
     }
 
     let mut response = Redirect::to(location).into_response();
@@ -504,22 +539,28 @@ fn authorization_response(location: &str) -> Response {
     response
 }
 
-fn authorization_loopback_bridge(location: &str) -> Response {
+fn authorization_loopback_bridge(
+    location: &str,
+    brand: &str,
+    client_name: Option<&str>,
+) -> Response {
     let escaped_location = escape_html(location);
+    let brand = escape_html(brand);
+    let client = display_client_name(client_name);
     let html = format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PREP Docs authorized</title>
+<title>{brand} authorized</title>
 <style>
 body{{font-family:system-ui,sans-serif;background:#f5f6f8;margin:0;display:grid;place-items:center;min-height:100vh;color:#17202a}}
 main{{width:min(420px,calc(100% - 40px));background:white;padding:32px;border-radius:14px;box-shadow:0 10px 30px #0002}}
 h1{{font-size:1.35rem;margin:0 0 8px}}p{{color:#59636e;line-height:1.5}}
 a{{box-sizing:border-box;display:block;width:100%;margin-top:24px;padding:12px;border-radius:8px;background:#202938;color:white;text-align:center;text-decoration:none;font-weight:700}}
 small{{display:block;margin-top:16px;color:#697482;line-height:1.45}}
-</style></head><body><main><h1>PREP Docs authorized</h1>
-<p>Your Docmost account was accepted. Continue to the local Codex callback to finish connecting the MCP.</p>
-<a id="continue-to-client" href="{escaped_location}">Continue to Codex</a>
-<small>Chrome may block automatic navigation from a public site to localhost. This explicit button keeps the callback secure and reliable.</small>
+</style></head><body><main><h1>{brand} authorized</h1>
+<p>Your {brand} account was accepted. Continue to {client} to finish connecting the MCP.</p>
+<a id="continue-to-client" href="{escaped_location}">Continue to {client}</a>
+<small>Browsers may block automatic navigation from a public site to localhost. This explicit button keeps the callback secure and reliable.</small>
 </main></body></html>"#
     );
     let mut response = hardened_auth_response(Html(html).into_response());
@@ -801,8 +842,11 @@ async fn validate_authorize_request(
         ));
     }
 
+    let client_name = client.client_name.clone();
+
     Ok(PendingAuthorization {
         client_id: query.client_id,
+        client_name,
         redirect_uri: query.redirect_uri,
         state: query.state,
         code_challenge,
@@ -812,14 +856,15 @@ async fn validate_authorize_request(
     })
 }
 
-fn render_login_page(request_id: &str, csrf: &str, error: Option<&str>) -> String {
+fn render_login_page(request_id: &str, csrf: &str, error: Option<&str>, brand: &str) -> String {
     let error = error
         .map(|message| format!("<p class=\"error\">{}</p>", escape_html(message)))
         .unwrap_or_default();
+    let brand = escape_html(brand);
     format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in to PREP Docs MCP</title>
+<title>Sign in to {brand} MCP</title>
 <style>
 body{{font-family:system-ui,sans-serif;background:#f5f6f8;margin:0;display:grid;place-items:center;min-height:100vh;color:#17202a}}
 main{{width:min(420px,calc(100% - 40px));background:white;padding:32px;border-radius:14px;box-shadow:0 10px 30px #0002}}
@@ -827,8 +872,8 @@ h1{{font-size:1.35rem;margin:0 0 8px}}p{{color:#59636e}}label{{display:block;fon
 input{{box-sizing:border-box;width:100%;margin-top:7px;padding:11px 12px;border:1px solid #c9ced6;border-radius:8px;font:inherit}}
 button{{width:100%;margin-top:24px;padding:12px;border:0;border-radius:8px;background:#202938;color:white;font:inherit;font-weight:700;cursor:pointer}}
 .error{{color:#b42318;background:#fef3f2;padding:10px;border-radius:8px}}small{{display:block;margin-top:16px;color:#697482;line-height:1.45}}
-</style></head><body><main><h1>Sign in to PREP Docs MCP</h1>
-<p>Use your PREP Docmost account. The MCP securely relays this login to Docmost over HTTPS and never stores your password.</p>
+</style></head><body><main><h1>Sign in to {brand} MCP</h1>
+<p>Use your {brand} account. The MCP relays this login to {brand} over HTTPS and never stores your password.</p>
 {error}<form method="post" action="/oauth/authorize">
 <input type="hidden" name="request_id" value="{}"><input type="hidden" name="csrf" value="{}">
 <label>Email<input name="email" type="email" autocomplete="username" required></label>
@@ -1026,6 +1071,29 @@ async fn clear_login_failures(state: &OAuthState, email: &str) {
         .remove(&token_hash(email));
 }
 
+/// Trim an operator-supplied brand down to something safe to render, falling back
+/// to `DEFAULT_BRAND` when it is blank. Length is capped so a stray value cannot
+/// blow out the page title.
+fn normalize_brand(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_BRAND.to_string();
+    }
+    trimmed.chars().take(MAX_BRAND_LENGTH).collect()
+}
+
+/// Render a registered client's name for display, escaped.
+///
+/// Any client can register with any `client_name`, so this string is attacker
+/// controlled and must never reach a page unescaped.
+fn display_client_name(client_name: Option<&str>) -> String {
+    client_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(escape_html)
+        .unwrap_or_else(|| UNNAMED_CLIENT.to_string())
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -1078,6 +1146,64 @@ mod tests {
         assert!(normalize_public_url("https://user@mcp.example").is_err());
     }
 
+    #[test]
+    fn brand_falls_back_to_docmost_and_is_bounded() {
+        assert_eq!(normalize_brand(""), DEFAULT_BRAND);
+        assert_eq!(normalize_brand("   "), DEFAULT_BRAND);
+        assert_eq!(normalize_brand("  PREP Docs  "), "PREP Docs");
+        assert_eq!(
+            normalize_brand(&"x".repeat(500)).chars().count(),
+            MAX_BRAND_LENGTH
+        );
+    }
+
+    #[test]
+    fn unnamed_clients_get_a_generic_label() {
+        // The pages must never hardcode one client's name: this server is used from
+        // Claude Code, Claude Desktop, Codex and Cursor alike.
+        assert_eq!(display_client_name(None), UNNAMED_CLIENT);
+        assert_eq!(display_client_name(Some("   ")), UNNAMED_CLIENT);
+        assert_eq!(display_client_name(Some("Cursor")), "Cursor");
+    }
+
+    #[test]
+    fn client_name_is_escaped_before_it_reaches_a_page() {
+        // client_name is self-declared at registration, so any client can supply
+        // markup. It lands in both the heading and the button label.
+        let displayed = display_client_name(Some("<script>alert(1)</script>"));
+        assert!(!displayed.contains('<'), "unescaped markup: {displayed}");
+        assert_eq!(displayed, "&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    #[test]
+    fn login_page_shows_the_configured_brand_and_no_vendor_name() {
+        let page = render_login_page("request-1", "csrf-1", None, "PREP Docs");
+        assert!(page.contains("Sign in to PREP Docs MCP"));
+        assert!(page.contains("Use your PREP Docs account"));
+        assert!(!page.contains("Codex"), "no client should be named here");
+    }
+
+    #[tokio::test]
+    async fn repeated_login_failures_lock_one_account_without_touching_others() {
+        let state = OAuthState::new(OAuthConfig {
+            public_url: "http://localhost:8787".to_string(),
+            docmost_base_url: "http://localhost:3000".to_string(),
+            brand: DEFAULT_BRAND.to_string(),
+        })
+        .expect("state builds");
+
+        for _ in 0..MAX_LOGIN_FAILURES_PER_ACCOUNT {
+            record_login_failure(&state, "victim@example.com").await;
+        }
+
+        assert!(login_is_rate_limited(&state, "victim@example.com").await);
+        // Lockout is per account, so one user cannot lock another out.
+        assert!(!login_is_rate_limited(&state, "bystander@example.com").await);
+
+        clear_login_failures(&state, "victim@example.com").await;
+        assert!(!login_is_rate_limited(&state, "victim@example.com").await);
+    }
+
     #[tokio::test]
     async fn oauth_tokens_are_bound_to_separate_docmost_accounts() -> anyhow::Result<()> {
         #[derive(Deserialize)]
@@ -1115,6 +1241,7 @@ mod tests {
         let oauth_state = OAuthState::new(OAuthConfig {
             public_url: format!("http://{oauth_address}"),
             docmost_base_url: format!("http://{docmost_address}"),
+            brand: DEFAULT_BRAND.to_string(),
         })?;
         let oauth_task = {
             let app = oauth_state.clone().routes();
@@ -1210,7 +1337,8 @@ mod tests {
             .await?;
         assert_eq!(authorized.status(), StatusCode::OK);
         let authorized_html = authorized.text().await?;
-        assert!(authorized_html.contains("Continue to Codex"));
+        // The bridge names whichever client registered, never a hardcoded one.
+        assert!(authorized_html.contains("Continue to test client"));
         let location = callback_href(&authorized_html).expect("authorization callback link");
 
         // Browsers can submit the form twice before following the first redirect.

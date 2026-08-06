@@ -3,10 +3,34 @@
 The MCP gateway Bearer token and the Docmost credential are different secrets.
 Use independent high-entropy values and rotate them independently.
 
+## Authentication modes
+
+`/mcp` accepts two kinds of credential. At least one must be configured — the
+server refuses to start with neither.
+
+| | Static Bearer token | Account OAuth |
+| --- | --- | --- |
+| Enabled by | `DOCMOST_MCP_BEARER_TOKEN` | `DOCMOST_MCP_ACCOUNT_AUTH=true` |
+| Identity | one shared Docmost credential | each user's own Docmost account |
+| Docmost permissions | whatever the shared account has | inherited per user |
+| Token lifetime | until rotated | short-lived, memory-only |
+| Intended for | single user, automation, break-glass | shared and multi-user servers |
+
+Both may be enabled at once: the static token is checked first and is the
+break-glass path. **Enabling account OAuth makes the static token optional, not
+harmless** — anything holding it still acts as the shared account, so drop
+`DOCMOST_MCP_BEARER_TOKEN` entirely on a multi-user deployment unless you need it.
+
+Account OAuth uses authorization code flow with PKCE (S256 required), exact
+registered redirect URIs, CSRF-protected login, per-account failed-login
+throttling, one-time authorization codes, and opaque tokens stored only as
+SHA-256 hashes. Grants live in memory, so a restart requires users to sign in
+again — deliberately.
+
 ## Supported boundary
 
 The default configuration is for a single machine: loopback HTTP, exact Host and
-Origin allowlists, and a local Codex client. If traffic leaves the machine, put the
+Origin allowlists, and a local MCP client. If traffic leaves the machine, put the
 server behind an HTTPS reverse proxy or private authenticated overlay network. The
 Rust process intentionally does not terminate TLS.
 
@@ -32,7 +56,15 @@ user before sending `confirm: true`.
 The audit log records timestamp, operation, target identifier, and status only.
 It deliberately excludes page content, comment content, passwords, and tokens.
 
-## Reporting
+## Reporting a vulnerability
 
-This is a local fork rather than an upstream-supported release. Treat findings in
-the upstream logic separately from findings in the HTTP/plugin hardening layer.
+Report privately through
+[GitHub Security Advisories](https://github.com/Rahulk644/docmost-mcp/security/advisories/new).
+Please do not open a public issue for a security problem.
+
+Include the version or commit, your configuration (with secrets redacted), and the
+steps to reproduce. Expect an initial response within seven days.
+
+Only the latest `main` is supported. This project is not affiliated with Docmost:
+report vulnerabilities in Docmost itself to
+[the Docmost project](https://github.com/docmost/docmost), not here.

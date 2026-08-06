@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use crate::{
-    oauth::{OAuthConfig, OAuthState},
+    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState},
     server::DocmostMcpServer,
     types::{AuthenticatedSession, StartupConfig},
 };
@@ -112,6 +112,7 @@ impl HttpServerConfig {
                     .context("DOCMOST_MCP_PUBLIC_URL is required for account authentication")?,
                 docmost_base_url: env::var("DOCMOST_BASE_URL")
                     .context("DOCMOST_BASE_URL is required for account authentication")?,
+                brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
             })
         } else {
             None

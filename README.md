@@ -136,6 +136,7 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_MCP_BEARER_TOKEN` | required unless account auth is enabled | Static local/break-glass token for `/mcp` |
 | `DOCMOST_MCP_ACCOUNT_AUTH` | `false` | Enables per-account browser login and OAuth discovery |
 | `DOCMOST_MCP_PUBLIC_URL` | — | Public HTTPS origin; required when account auth is enabled |
+| `DOCMOST_MCP_BRAND` | `Docmost` | Product name on the sign-in pages, for rebranded deployments |
 | `DOCMOST_MCP_BIND` | `127.0.0.1:8787` | HTTP listen address |
 | `DOCMOST_MCP_ALLOWED_HOSTS` | loopback | Comma-separated Host allowlist |
 | `DOCMOST_MCP_ALLOWED_ORIGINS` | loopback | Comma-separated browser Origin allowlist |
