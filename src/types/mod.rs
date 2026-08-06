@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 mod inputs;
 pub use inputs::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredConfig {
     pub base_url: String,
@@ -12,7 +12,7 @@ pub struct StoredConfig {
     pub last_authenticated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSession {
     pub token: String,
@@ -20,7 +20,7 @@ pub struct StoredSession {
     pub saved_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredCredentials {
     pub email: String,
     pub password: String,
@@ -40,7 +40,7 @@ pub struct StartupConfig {
     pub interactive_auth: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginInput {
     pub base_url: String,
@@ -58,7 +58,7 @@ pub struct AuthWindowSession {
     pub window_height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostSpace {
     pub id: String,
@@ -68,9 +68,18 @@ pub struct DocmostSpace {
     pub member_count: Option<i64>,
     pub visibility: Option<String>,
     pub default_role: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostSpaceWithMembership {
     pub id: String,
@@ -81,16 +90,34 @@ pub struct DocmostSpaceWithMembership {
     pub visibility: Option<String>,
     pub default_role: Option<String>,
     pub membership: Option<DocmostSpaceMembership>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostSpaceMembership {
     pub user_id: Option<String>,
     pub role: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostSearchResult {
     pub id: Option<String>,
@@ -103,14 +130,32 @@ pub struct DocmostSearchResult {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub space: Option<DocmostSearchSpace>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostSearchSpace {
     pub id: Option<String>,
     pub name: Option<String>,
     pub slug: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,24 +171,51 @@ pub struct DocmostPage {
     pub space: Option<DocmostPageSpace>,
     pub creator: Option<DocmostPageCreator>,
     pub content: Option<Value>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostPageSpace {
     pub id: Option<String>,
     pub name: Option<String>,
     pub slug: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostPageCreator {
     pub id: Option<String>,
     pub name: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostPageListItem {
     pub id: String,
@@ -156,6 +228,15 @@ pub struct DocmostPageListItem {
     pub updated_at: Option<String>,
     pub space: Option<DocmostSearchSpace>,
     pub position: Option<String>, // fractional-index sibling ordering key; see crate::position
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,17 +252,35 @@ pub struct DocmostComment {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub resolved_at: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostUserSummary {
     pub id: Option<String>,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostUser {
     pub id: String,
@@ -190,9 +289,18 @@ pub struct DocmostUser {
     pub avatar_url: Option<String>,
     pub role: Option<String>,
     pub deactivated_at: Option<String>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocmostWorkspace {
     pub id: String,
@@ -201,10 +309,28 @@ pub struct DocmostWorkspace {
     pub default_space_id: Option<String>,
     pub member_count: Option<i64>,
     pub has_license_key: Option<bool>,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DocmostCurrentUserResponse {
     pub user: DocmostUser,
     pub workspace: DocmostWorkspace,
+    /// Every field Docmost returned that this struct does not model.
+    ///
+    /// Without this, serde silently drops unknown keys, so `response_format: "json"`
+    /// promised "complete records" while quietly discarding whatever the server
+    /// added since these structs were written. Capturing them here means the JSON
+    /// response really is everything the API sent, and new Docmost fields appear
+    /// automatically instead of requiring a code change.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
