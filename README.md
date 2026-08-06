@@ -11,9 +11,9 @@ Docmost's own MCP endpoint is an **Enterprise** feature. This is an independent
 server built for **self-hosted and Community** deployments that want agent access
 without an enterprise licence. It is not affiliated with Docmost.
 
-**Security is the point of this project**: writes are off by default, the gateway
-token and your Docmost credentials never live in a client manifest, and the HTTP
-surface authenticates every request.
+**Security is the point of this project**: writes are off by default, Docmost
+passwords never live in a client manifest, and the HTTP surface can bind every
+MCP access token to the Docmost account that authorized it.
 
 ## Works with any MCP client
 
@@ -27,8 +27,11 @@ Only the config file differs.
 | Codex | uses the bundled [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) → [`.mcp.json`](.mcp.json) |
 | Cursor | `.cursor/mcp.json`, same URL and header |
 
-The bearer token is read from the `DOCMOST_MCP_BEARER_TOKEN` environment variable
-rather than written into any manifest, so the manifests are safe to commit.
+Remote deployments can expose OAuth discovery so compatible clients open a normal
+browser login. The user signs in with their own Docmost account; the password is
+validated once and discarded, while tool calls inherit that account's space roles.
+The static `DOCMOST_MCP_BEARER_TOKEN` remains available for local and break-glass
+administrative compatibility.
 
 ## Quick start
 
@@ -54,6 +57,21 @@ export DOCMOST_PASSWORD="use-a-secret-manager"
 ```
 
 Do not set both modes — the API token wins when present.
+
+For a multi-user remote server, do not configure a shared Docmost credential.
+Enable account authorization instead:
+
+```bash
+export DOCMOST_BASE_URL="https://docs.example.com"
+export DOCMOST_MCP_ACCOUNT_AUTH=true
+export DOCMOST_MCP_PUBLIC_URL="https://mcp.example.com"
+export DOCMOST_MCP_BEARER_TOKEN="$(openssl rand -hex 32)" # break-glass only
+```
+
+An OAuth-capable MCP client pointed at `https://mcp.example.com/mcp` discovers the
+login page automatically. Authorization uses code flow with PKCE and dynamic
+client registration. Access and refresh grants are held in memory, so a server
+restart intentionally requires users to sign in again.
 
 Verify:
 
@@ -91,8 +109,12 @@ when it hasn't, and never pages forever off a bad inference.
 ## Security defaults
 
 - Binds to `127.0.0.1:8787` unless changed.
-- `/mcp` requires a Bearer token of at least 32 bytes; comparison is constant-time,
-  and obvious placeholder tokens are rejected outright.
+- `/mcp` requires either an account-bound OAuth Bearer token or the static
+  break-glass token. Static-token comparison is constant-time, and obvious
+  placeholder values are rejected outright.
+- Account authorization uses OAuth authorization code + PKCE, exact registered
+  redirects, CSRF protection, per-account failed-login throttling, one-time codes,
+  and short-lived opaque tokens. Docmost passwords are never persisted.
 - Host and Origin allowlists are enforced (DNS-rebinding protection).
 - `/health` is public and returns only service status.
 - **Mutating tools are disabled** unless `DOCMOST_MCP_ENABLE_WRITES=true`, *and*
@@ -111,7 +133,9 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_BASE_URL` | required | Docmost origin, e.g. `https://docs.example.com` |
 | `DOCMOST_API_TOKEN` | — | Preferred Docmost API token |
 | `DOCMOST_EMAIL`, `DOCMOST_PASSWORD` | — | Community-edition fallback; both must be set |
-| `DOCMOST_MCP_BEARER_TOKEN` | required | Secret clients use to authenticate to `/mcp` |
+| `DOCMOST_MCP_BEARER_TOKEN` | required unless account auth is enabled | Static local/break-glass token for `/mcp` |
+| `DOCMOST_MCP_ACCOUNT_AUTH` | `false` | Enables per-account browser login and OAuth discovery |
+| `DOCMOST_MCP_PUBLIC_URL` | — | Public HTTPS origin; required when account auth is enabled |
 | `DOCMOST_MCP_BIND` | `127.0.0.1:8787` | HTTP listen address |
 | `DOCMOST_MCP_ALLOWED_HOSTS` | loopback | Comma-separated Host allowlist |
 | `DOCMOST_MCP_ALLOWED_ORIGINS` | loopback | Comma-separated browser Origin allowlist |
