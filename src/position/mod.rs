@@ -4,7 +4,7 @@
 //! 5..=12 chars. It uses the base62 variant of the `fractional-indexing-jittered`
 //! npm package (`generateJitteredKeyBetween`), and its server assigns a new page's
 //! position with `generateJitteredKeyBetween(lastSiblingPosition, null)` — i.e. it
-//! appends after the current last sibling. `move_page` produces a compatible key, so
+//! appends after the current last sibling. `docmost_move_page` produces a compatible key, so
 //! this is a faithful port of that scheme.
 //!
 //! [`generate_key_between`] is deterministic; [`generate_jittered_key_between`] adds a

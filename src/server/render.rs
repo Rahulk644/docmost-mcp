@@ -62,7 +62,7 @@ pub fn format_search_results(query: &str, results: &[DocmostSearchResult]) -> St
         results.iter().take(5).count(),
         total_results
     ));
-    lines.push("Use `get_page` with a slug ID to retrieve the full page.".to_string());
+    lines.push("Use `docmost_get_page` with a slug ID to retrieve the full page.".to_string());
     lines.join("\n")
 }
 

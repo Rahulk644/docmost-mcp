@@ -1,4 +1,4 @@
-//! Page-content write tools: `create_page` and `update_page` (Markdown → ProseMirror).
+//! Page-content write tools: `docmost_create_page` and `docmost_update_page` (Markdown → ProseMirror).
 //!
 //! In their own `#[tool_router]` impl (a named `page_write_tool_router`, merged into the
 //! server's router in `new()`) to keep each tools file within the size limit.
@@ -108,7 +108,7 @@ impl DocmostMcpServer {
         Ok(format_updated_page(&page, body_note.as_deref()))
     }
 
-    /// A caveat string for `update_page` when a body was sent but this server may not apply
+    /// A caveat string for `docmost_update_page` when a body was sent but this server may not apply
     /// it over REST. `None` when the server supports REST body updates (no caveat needed).
     async fn body_update_note(&self) -> Option<String> {
         if self.client.capabilities().await.rest_page_body_update {
