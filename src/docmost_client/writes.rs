@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
-use super::{CursorListResult, normalize_cursor_list_result};
+use super::{CursorListResult, into_page};
 use crate::{
     debug::debug_log,
     position::generate_jittered_key_between,
@@ -221,7 +221,7 @@ impl super::DocmostClient {
         let result: CursorListResult<DocmostPageListItem> = self
             .request("/api/pages/sidebar-pages", payload, true)
             .await?;
-        Ok(normalize_cursor_list_result(result)
+        Ok(into_page(result).items
             .into_iter()
             .filter(|p| Some(p.id.as_str()) != exclude_id)
             .filter_map(|p| p.position)

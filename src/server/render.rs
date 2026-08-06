@@ -1,6 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::docmost_client::Page;
 use crate::types::{
     DocmostComment, DocmostCurrentUserResponse, DocmostPage, DocmostPageListItem,
     DocmostSearchResult, DocmostUser,
@@ -65,13 +66,52 @@ pub fn format_search_results(query: &str, results: &[DocmostSearchResult]) -> St
     lines.join("\n")
 }
 
-pub fn format_page_list(title: &str, scope: &str, pages: &[DocmostPageListItem]) -> String {
+/// How many items these renderers show before truncating.
+const DISPLAY_CAP: usize = 10;
+/// Members render wider rows, so this list shows more before truncating.
+const MEMBER_DISPLAY_CAP: usize = 20;
+
+/// Footer telling the agent exactly what it has and how to get the rest.
+///
+/// Two things were previously invisible to a caller. The renderers cap output at
+/// [`DISPLAY_CAP`], so an agent could believe it had seen everything when it had
+/// not; and the next cursor was discarded entirely, which made the `cursor`
+/// parameter unusable — you could only page forward if you already knew the cursor.
+///
+/// `has_more` is reported as unknown when the server said nothing, rather than
+/// guessed from a full page, so an agent never pages forever off a bad inference.
+pub fn format_pagination<T>(page: &Page<T>, shown: usize, cap: usize, noun: &str) -> String {
+    let mut parts = Vec::new();
+    if shown < page.len() {
+        parts.push(format!(
+            "Showing {shown} of {} fetched {noun} (display cap {cap})",
+            page.len()
+        ));
+    } else {
+        parts.push(format!("Showing {shown} {noun}"));
+    }
+    if let Some(total) = page.total {
+        parts.push(format!("{total} total"));
+    }
+    match (page.has_more, page.next_cursor.as_deref()) {
+        (Some(true), Some(cursor)) => {
+            parts.push(format!("more available — pass cursor `{cursor}` to continue"));
+        }
+        (Some(true), None) => parts.push("more available".to_string()),
+        (Some(false), _) => parts.push("end of results".to_string()),
+        (None, Some(cursor)) => parts.push(format!("pass cursor `{cursor}` to continue")),
+        (None, None) => {}
+    }
+    parts.join(" · ")
+}
+
+pub fn format_page_list(title: &str, scope: &str, pages: &Page<DocmostPageListItem>) -> String {
     if pages.is_empty() {
         return format!("No Docmost pages were found for {scope}.");
     }
 
     let mut lines = vec![format!("## {title}"), String::new()];
-    for (index, page) in pages.iter().take(10).enumerate() {
+    for (index, page) in pages.items.iter().take(DISPLAY_CAP).enumerate() {
         let icon = page.icon.as_deref().unwrap_or("");
         let title = page.title.as_deref().unwrap_or("Untitled");
         if icon.is_empty() {
@@ -91,21 +131,22 @@ pub fn format_page_list(title: &str, scope: &str, pages: &[DocmostPageListItem])
         ));
         lines.push(String::new());
     }
-    lines.push(format!(
-        "Showing {} of {} pages.",
-        pages.iter().take(10).count(),
-        pages.len()
+    lines.push(format_pagination(
+        pages,
+        pages.items.iter().take(DISPLAY_CAP).count(),
+        DISPLAY_CAP,
+        "pages",
     ));
     lines.join("\n")
 }
 
-pub fn format_comments(page_id: &str, comments: &[DocmostComment]) -> String {
+pub fn format_comments(page_id: &str, comments: &Page<DocmostComment>) -> String {
     if comments.is_empty() {
         return format!("No comments were found for page `{page_id}`.");
     }
 
     let mut lines = vec![format!("## Comments for Page `{page_id}`"), String::new()];
-    for (index, comment) in comments.iter().take(10).enumerate() {
+    for (index, comment) in comments.items.iter().take(DISPLAY_CAP).enumerate() {
         let author = comment
             .creator
             .as_ref()
@@ -131,15 +172,16 @@ pub fn format_comments(page_id: &str, comments: &[DocmostComment]) -> String {
         ));
         lines.push(String::new());
     }
-    lines.push(format!(
-        "Showing {} of {} comments.",
-        comments.iter().take(10).count(),
-        comments.len()
+    lines.push(format_pagination(
+        comments,
+        comments.items.iter().take(DISPLAY_CAP).count(),
+        DISPLAY_CAP,
+        "comments",
     ));
     lines.join("\n")
 }
 
-pub fn format_workspace_members(members: &[DocmostUser]) -> String {
+pub fn format_workspace_members(members: &Page<DocmostUser>) -> String {
     if members.is_empty() {
         return "No Docmost workspace members were found.".to_string();
     }
@@ -151,7 +193,7 @@ pub fn format_workspace_members(members: &[DocmostUser]) -> String {
         "| --- | --- | --- | --- |".to_string(),
     ];
 
-    for member in members.iter().take(20) {
+    for member in members.items.iter().take(MEMBER_DISPLAY_CAP) {
         lines.push(format!(
             "| {} | {} | {} | {} |",
             member.name.as_deref().unwrap_or("Unknown"),
@@ -162,10 +204,11 @@ pub fn format_workspace_members(members: &[DocmostUser]) -> String {
     }
 
     lines.push(String::new());
-    lines.push(format!(
-        "Showing {} of {} members.",
-        members.iter().take(20).count(),
-        members.len()
+    lines.push(format_pagination(
+        members,
+        members.items.iter().take(MEMBER_DISPLAY_CAP).count(),
+        MEMBER_DISPLAY_CAP,
+        "members",
     ));
     lines.join("\n")
 }

@@ -36,10 +36,66 @@ pub enum ListResult<T> {
     Wrapped { items: Option<Vec<T>> },
 }
 
+/// Pagination metadata returned alongside a list.
+///
+/// Every field is optional and defaulted on purpose. Docmost has shipped this
+/// envelope in more than one shape (nested under `meta`, and flat alongside
+/// `items`), and a CE instance may omit it entirely — so a missing field must
+/// degrade to "unknown", never to a deserialization failure that breaks an
+/// otherwise good response.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PaginationMeta {
+    pub limit: Option<u32>,
+    pub page: Option<u32>,
+    pub total: Option<u64>,
+    pub count: Option<u64>,
+    pub has_next_page: Option<bool>,
+    pub has_prev_page: Option<bool>,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorListResult<T> {
     pub items: Option<Vec<T>>,
+    /// Nested form: `{ items: [...], meta: { nextCursor, hasNextPage, ... } }`
+    #[serde(default)]
+    pub meta: Option<PaginationMeta>,
+    /// Flat form: `{ items: [...], nextCursor: "..." }`
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_next_page: Option<bool>,
+    #[serde(default)]
+    pub total: Option<u64>,
+}
+
+/// A page of results plus the metadata an agent needs to fetch the next one.
+///
+/// Returning a bare `Vec` (as this client previously did) silently discards the
+/// cursor, which makes the `cursor` tool parameter unusable: the caller can only
+/// paginate if it somehow already knows the next cursor. Carrying it here is what
+/// makes paging actually work.
+#[derive(Debug, Clone)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+    /// `None` when the server told us nothing either way — reported as unknown
+    /// rather than guessed, so an agent never wrongly concludes it has everything.
+    pub has_more: Option<bool>,
+}
+
+impl<T> Page<T> {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 mod writes;
@@ -133,7 +189,7 @@ impl DocmostClient {
         space_id: &str,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<Vec<DocmostPageListItem>> {
+    ) -> Result<Page<DocmostPageListItem>> {
         let mut payload = serde_json::json!({ "spaceId": space_id });
         if let Some(limit) = limit {
             payload["limit"] = Value::from(limit);
@@ -145,7 +201,7 @@ impl DocmostClient {
         let result = self
             .request::<CursorListResult<DocmostPageListItem>>("/api/pages/recent", payload, true)
             .await?;
-        Ok(normalize_cursor_list_result(result))
+        Ok(into_page(result))
     }
 
     pub async fn list_child_pages(
@@ -153,7 +209,7 @@ impl DocmostClient {
         page_id: &str,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<Vec<DocmostPageListItem>> {
+    ) -> Result<Page<DocmostPageListItem>> {
         let mut payload = serde_json::json!({ "pageId": page_id });
         if let Some(limit) = limit {
             payload["limit"] = Value::from(limit);
@@ -169,7 +225,7 @@ impl DocmostClient {
                 true,
             )
             .await?;
-        Ok(normalize_cursor_list_result(result))
+        Ok(into_page(result))
     }
 
     pub async fn get_comments(
@@ -177,7 +233,7 @@ impl DocmostClient {
         page_id: &str,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<Vec<DocmostComment>> {
+    ) -> Result<Page<DocmostComment>> {
         let mut payload = serde_json::json!({ "pageId": page_id });
         if let Some(limit) = limit {
             payload["limit"] = Value::from(limit);
@@ -189,7 +245,7 @@ impl DocmostClient {
         let result = self
             .request::<CursorListResult<DocmostComment>>("/api/comments", payload, true)
             .await?;
-        Ok(normalize_cursor_list_result(result))
+        Ok(into_page(result))
     }
 
     pub async fn list_workspace_members(
@@ -198,7 +254,7 @@ impl DocmostClient {
         cursor: Option<&str>,
         query: Option<&str>,
         admin_view: Option<bool>,
-    ) -> Result<Vec<DocmostUser>> {
+    ) -> Result<Page<DocmostUser>> {
         let mut payload = serde_json::json!({});
         if let Some(limit) = limit {
             payload["limit"] = Value::from(limit);
@@ -216,7 +272,7 @@ impl DocmostClient {
         let result = self
             .request::<CursorListResult<DocmostUser>>("/api/workspace/members", payload, true)
             .await?;
-        Ok(normalize_cursor_list_result(result))
+        Ok(into_page(result))
     }
 
     pub async fn get_current_user(&self) -> Result<DocmostCurrentUserResponse> {
@@ -311,8 +367,27 @@ pub fn normalize_list_result<T>(result: Option<ListResult<T>>) -> Vec<T> {
     }
 }
 
-pub fn normalize_cursor_list_result<T>(result: CursorListResult<T>) -> Vec<T> {
-    result.items.unwrap_or_default()
+/// Fold a cursor list response into a [`Page`], accepting either envelope shape.
+///
+/// Nested `meta` wins when present; the flat fields are the fallback. `has_more`
+/// is only inferred when the server actually said something — an explicit
+/// `hasNextPage`, or a `nextCursor` (whose presence implies more). It is never
+/// guessed from `items.len() == limit`, which is a classic off-by-one source when
+/// the last page happens to be exactly full.
+pub fn into_page<T>(result: CursorListResult<T>) -> Page<T> {
+    let meta = result.meta.unwrap_or_default();
+    let next_cursor = meta.next_cursor.or(result.next_cursor);
+    let has_more = meta
+        .has_next_page
+        .or(result.has_next_page)
+        .or_else(|| next_cursor.as_ref().map(|_| true));
+
+    Page {
+        items: result.items.unwrap_or_default(),
+        next_cursor,
+        total: meta.total.or(result.total),
+        has_more,
+    }
 }
 
 async fn parse_response<T>(response: Response) -> Result<T>
