@@ -8,7 +8,7 @@ use axum::{
     Form, Json, Router,
     extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -528,22 +528,10 @@ async fn complete_authorization(
 }
 
 fn authorization_response(location: &str, brand: &str, client_name: Option<&str>) -> Response {
-    let uses_loopback_callback = Url::parse(location)
-        .is_ok_and(|url| url.scheme() == "http" && is_loopback_host(url.host_str()));
-    if uses_loopback_callback {
-        return authorization_loopback_bridge(location, brand, client_name);
-    }
-
-    let mut response = Redirect::to(location).into_response();
-    clear_csrf_cookie(&mut response);
-    response
-}
-
-fn authorization_loopback_bridge(
-    location: &str,
-    brand: &str,
-    client_name: Option<&str>,
-) -> Response {
+    // Commit a same-origin document before navigating to the registered client.
+    // Chrome applies the login form's form-action 'self' to HTTP redirects too,
+    // so a cross-origin 303 after a successful login can leave the form stuck.
+    // An explicit link also preserves the reliable handoff to loopback clients.
     let escaped_location = escape_html(location);
     let brand = escape_html(brand);
     let client = display_client_name(client_name);
@@ -560,7 +548,7 @@ small{{display:block;margin-top:16px;color:#697482;line-height:1.45}}
 </style></head><body><main><h1>{brand} authorized</h1>
 <p>Your {brand} account was accepted. Continue to {client} to finish connecting the MCP.</p>
 <a id="continue-to-client" href="{escaped_location}">Continue to {client}</a>
-<small>Browsers may block automatic navigation from a public site to localhost. This explicit button keeps the callback secure and reliable.</small>
+<small>Use the Continue button to return to your MCP client and finish connecting.</small>
 </main></body></html>"#
     );
     let mut response = hardened_auth_response(Html(html).into_response());
@@ -1250,9 +1238,20 @@ mod tests {
             })
         };
 
-        let alice =
-            authenticate_test_account(&oauth_state, oauth_address, "alice@example.com").await?;
-        let bob = authenticate_test_account(&oauth_state, oauth_address, "bob@example.com").await?;
+        let alice = authenticate_test_account(
+            &oauth_state,
+            oauth_address,
+            "alice@example.com",
+            "http://127.0.0.1:49123/callback",
+        )
+        .await?;
+        let bob = authenticate_test_account(
+            &oauth_state,
+            oauth_address,
+            "bob@example.com",
+            "https://chatgpt.com/connector/oauth/test-callback",
+        )
+        .await?;
 
         assert_ne!(alice.access_token, bob.access_token);
         assert_eq!(
@@ -1281,10 +1280,10 @@ mod tests {
         state: &OAuthState,
         oauth_address: std::net::SocketAddr,
         email: &str,
+        callback: &str,
     ) -> anyhow::Result<TestTokenResponse> {
         let client = Client::builder().redirect(Policy::none()).build()?;
         let base = format!("http://{oauth_address}");
-        let callback = "http://127.0.0.1:49123/callback";
         let registration: TestRegistrationResponse = client
             .post(format!("{base}/oauth/register"))
             .json(&json!({
@@ -1336,6 +1335,15 @@ mod tests {
             .send()
             .await?;
         assert_eq!(authorized.status(), StatusCode::OK);
+        // A cross-origin HTTP redirect after a POST is blocked by Chrome when
+        // the sign-in page has form-action 'self'. Both hosted and loopback
+        // clients must get a committed document with an explicit callback link.
+        assert!(authorized.headers().get(header::LOCATION).is_none());
+        assert!(
+            authorized.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()?
+                .contains("form-action 'self'")
+        );
         let authorized_html = authorized.text().await?;
         // The bridge names whichever client registered, never a hardcoded one.
         assert!(authorized_html.contains("Continue to test client"));
@@ -1357,6 +1365,11 @@ mod tests {
         );
 
         let redirect = Url::parse(&location)?;
+        assert!(
+            redirect
+                .query_pairs()
+                .any(|(key, value)| key == "state" && value == "test-state")
+        );
         let code = redirect
             .query_pairs()
             .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
