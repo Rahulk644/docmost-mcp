@@ -1028,7 +1028,7 @@ fn render_native_page(
     let csrf = escape_html(csrf);
     let content = if let Some(session) = session {
         format!(
-            r#"<h1>Connect {brand} to {client}</h1><p>Authorize as {} using your existing Docmost session.</p>
+            r#"<h1>Connect {brand} to {client}</h1><p>Authorize as <!--email_off-->{}<!--/email_off--> using your existing Docmost session.</p>
 <form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{request_id}"><input type="hidden" name="csrf" value="{csrf}"><button type="submit">Authorize connection</button></form>
 <p>Your account's space permissions apply. Writes still require explicit confirmation.</p>"#,
             escape_html(&session.email)
@@ -1479,7 +1479,7 @@ mod tests {
             .await?
             .text()
             .await?;
-        assert!(consent.contains("alice@example.com"));
+        assert!(consent.contains("<!--email_off-->alice@example.com<!--/email_off-->"));
         assert!(consent.contains("Native test"));
         assert!(!consent.contains("name=\"password\""));
         assert!(state.inner.codes.read().await.is_empty());
