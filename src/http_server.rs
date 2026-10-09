@@ -112,6 +112,7 @@ impl HttpServerConfig {
                     .context("DOCMOST_MCP_PUBLIC_URL is required for account authentication")?,
                 docmost_base_url: env::var("DOCMOST_BASE_URL")
                     .context("DOCMOST_BASE_URL is required for account authentication")?,
+                browser_url: env::var("DOCMOST_MCP_BROWSER_URL").ok(),
                 brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
             })
         } else {

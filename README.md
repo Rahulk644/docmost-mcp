@@ -80,6 +80,43 @@ curl http://127.0.0.1:8787/health
 curl -i http://127.0.0.1:8787/mcp   # expect 401 without the Bearer token
 ```
 
+## Use the existing Docmost login screen
+
+For browser session authentication, set `DOCMOST_MCP_BROWSER_URL` to the
+public **Docmost origin**, such as `https://docs.example.com`. Keep
+`DOCMOST_MCP_PUBLIC_URL` set to your MCP origin. Forward `/oauth/authorize`
+and `/oauth/resume` on the Docmost origin to this MCP service, preserving
+`Host` and cookies. Add the Docmost host and origin to the MCP allowlists.
+Do not forward Docmost's `/login` or `/api` routes to MCP.
+
+OAuth discovery advertises authorization on the Docmost origin. Users open
+the ordinary Docmost login screen in a tab, then return to the authorization
+tab, which detects their session and displays the account and registered
+client before asking for consent. Existing signed-in users proceed directly
+to consent. Docmost handles passwords, MFA and SSO; MCP validates the
+HttpOnly session through `/api/users/me` and never asks for a password in this
+mode. Switching accounts requires fresh consent. PKCE and per-call write
+confirmation remain required.
+
+Example operator configuration (use your own domains):
+
+```dotenv
+DOCMOST_MCP_ACCOUNT_AUTH=true
+DOCMOST_BASE_URL=http://docmost:3000
+DOCMOST_MCP_PUBLIC_URL=https://mcp.example.com
+DOCMOST_MCP_BROWSER_URL=https://docs.example.com
+DOCMOST_MCP_BRAND=Docmost
+DOCMOST_MCP_ALLOWED_HOSTS=mcp.example.com,docs.example.com
+DOCMOST_MCP_ALLOWED_ORIGINS=https://mcp.example.com,https://docs.example.com
+```
+
+Without `DOCMOST_MCP_BROWSER_URL`, the existing credential relay remains
+available for deployments that cannot route OAuth on the Docmost origin.
+Use the generic OSS image for personal deployments; a company-branded image
+may have compiled-in company text or assets even when its environment is
+changed. Reconnect clients after restarting MCP because OAuth grants are
+held in memory.
+
 ## Tools
 
 All tools are prefixed `docmost_` so they never collide with other MCP servers
