@@ -52,6 +52,8 @@ pub struct OAuthConfig {
     /// Product name shown on the sign-in and authorized pages. Deployments that
     /// rebrand Docmost set `DOCMOST_MCP_BRAND`; everyone else gets `DEFAULT_BRAND`.
     pub brand: String,
+    /// Public Docmost origin, with /oauth/* forwarded to this server.
+    pub browser_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ pub struct OAuthState {
 }
 
 struct OAuthInner {
+    browser_url: Option<String>,
     public_url: String,
     resource_url: String,
     docmost_base_url: String,
@@ -90,6 +93,7 @@ struct PendingAuthorization {
     code_challenge: String,
     scope: String,
     csrf_hash: String,
+    consent_session_hash: Option<String>,
     expires_at: DateTime<Utc>,
 }
 
@@ -157,7 +161,9 @@ struct AuthorizeQuery {
 struct LoginForm {
     request_id: String,
     csrf: String,
+    #[serde(default)]
     email: String,
+    #[serde(default)]
     password: String,
 }
 
@@ -185,8 +191,14 @@ struct TokenResponse {
 impl OAuthState {
     pub fn new(config: OAuthConfig) -> anyhow::Result<Self> {
         let public_url = normalize_public_url(&config.public_url)?;
+        let browser_url = config
+            .browser_url
+            .as_deref()
+            .map(normalize_public_url)
+            .transpose()?;
         Ok(Self {
             inner: Arc::new(OAuthInner {
+                browser_url,
                 resource_url: format!("{public_url}/mcp"),
                 public_url,
                 docmost_base_url: normalize_base_url(&config.docmost_base_url),
@@ -222,6 +234,7 @@ impl OAuthState {
                 get(authorize).post(complete_authorization),
             )
             .route("/oauth/token", post(exchange_token))
+            .route("/oauth/resume", get(resume_native_authorization))
             .layer(DefaultBodyLimit::max(16 * 1_024))
             .with_state(self)
     }
@@ -286,7 +299,7 @@ async fn authorization_server_metadata(State(state): State<OAuthState>) -> Json<
     let base = &state.inner.public_url;
     Json(json!({
         "issuer": base,
-        "authorization_endpoint": format!("{base}/oauth/authorize"),
+        "authorization_endpoint": format!("{}/oauth/authorize", state.inner.browser_url.as_deref().unwrap_or(base)),
         "token_endpoint": format!("{base}/oauth/token"),
         "registration_endpoint": format!("{base}/oauth/register"),
         "response_types_supported": ["code"],
@@ -358,7 +371,14 @@ async fn register_client(
 async fn authorize(
     State(state): State<OAuthState>,
     Query(query): Query<AuthorizeQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    if !native_host_matches(&state, &headers) {
+        return oauth_html_error(
+            StatusCode::BAD_REQUEST,
+            "Use the authorization endpoint advertised by OAuth discovery.",
+        );
+    }
     let pending = match validate_authorize_request(&state, query).await {
         Ok(pending) => pending,
         Err(response) => return *response,
@@ -386,9 +406,32 @@ async fn authorize(
         .await
         .insert(request_id.clone(), pending);
 
-    let html = render_login_page(&request_id, &csrf, None, &state.inner.brand);
+    let client_name = state
+        .inner
+        .pending
+        .read()
+        .await
+        .get(&request_id)
+        .and_then(|p| p.client_name.clone());
+    let native = if state.inner.browser_url.is_some() {
+        native_session(&state, &headers).await
+    } else {
+        None
+    };
+    bind_native_consent(&state, &request_id, native.as_ref()).await;
+    let html = if state.inner.browser_url.is_some() {
+        render_native_page(
+            &request_id,
+            &csrf,
+            native.as_ref(),
+            &state.inner.brand,
+            client_name.as_deref(),
+        )
+    } else {
+        render_login_page(&request_id, &csrf, None, &state.inner.brand)
+    };
     let cookie = format!(
-        "mcp_auth_csrf={csrf}; Path=/oauth/authorize; Max-Age=600; HttpOnly; Secure; SameSite=Strict"
+        "mcp_auth_csrf={csrf}; Path=/oauth; Max-Age=600; HttpOnly; Secure; SameSite=Strict"
     );
     let mut response = hardened_auth_response(Html(html).into_response());
     response.headers_mut().insert(
@@ -403,6 +446,12 @@ async fn complete_authorization(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    if !native_host_matches(&state, &headers) {
+        return oauth_html_error(
+            StatusCode::BAD_REQUEST,
+            "Use the configured Docmost authorization origin.",
+        );
+    }
     let pending = state
         .inner
         .pending
@@ -444,46 +493,64 @@ async fn complete_authorization(
         return oauth_html_error(StatusCode::BAD_REQUEST, "Login security check failed.");
     }
 
-    let normalized_email = form.email.trim().to_ascii_lowercase();
-    if normalized_email.is_empty()
-        || normalized_email.len() > 320
-        || form.password.is_empty()
-        || form.password.len() > 1_024
-    {
-        return oauth_html_error(StatusCode::BAD_REQUEST, "Email or password is invalid.");
-    }
-    if login_is_rate_limited(&state, &normalized_email).await {
-        return oauth_html_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many failed sign-in attempts. Try again in 15 minutes.",
-        );
-    }
-
-    let session = match AuthManager::authenticate_once(LoginInput {
-        base_url: state.inner.docmost_base_url.clone(),
-        email: normalized_email.clone(),
-        password: form.password,
-    })
-    .await
-    {
-        Ok(session) => session,
-        Err(_) => {
-            record_login_failure(&state, &normalized_email).await;
-            return hardened_auth_response(
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Html(render_login_page(
-                        &form.request_id,
-                        &form.csrf,
-                        Some("Email or password was not accepted by Docmost."),
-                        &state.inner.brand,
-                    )),
-                )
-                    .into_response(),
+    let session = if state.inner.browser_url.is_some() {
+        let Some(session) = native_session(&state, &headers).await else {
+            return oauth_html_error(
+                StatusCode::UNAUTHORIZED,
+                "Sign in to Docmost before authorizing this connection.",
+            );
+        };
+        if pending.consent_session_hash.as_deref() != Some(token_hash(&session.token).as_str()) {
+            return oauth_html_error(
+                StatusCode::BAD_REQUEST,
+                "Your Docmost account changed. Return to the authorization page and confirm the current account.",
             );
         }
+        session
+    } else {
+        let normalized_email = form.email.trim().to_ascii_lowercase();
+        if normalized_email.is_empty()
+            || normalized_email.len() > 320
+            || form.password.is_empty()
+            || form.password.len() > 1_024
+        {
+            return oauth_html_error(StatusCode::BAD_REQUEST, "Email or password is invalid.");
+        }
+        if login_is_rate_limited(&state, &normalized_email).await {
+            return oauth_html_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many failed sign-in attempts. Try again in 15 minutes.",
+            );
+        }
+
+        let session = match AuthManager::authenticate_once(LoginInput {
+            base_url: state.inner.docmost_base_url.clone(),
+            email: normalized_email.clone(),
+            password: form.password,
+        })
+        .await
+        {
+            Ok(session) => session,
+            Err(_) => {
+                record_login_failure(&state, &normalized_email).await;
+                return hardened_auth_response(
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Html(render_login_page(
+                            &form.request_id,
+                            &form.csrf,
+                            Some("Email or password was not accepted by Docmost."),
+                            &state.inner.brand,
+                        )),
+                    )
+                        .into_response(),
+                );
+            }
+        };
+        clear_login_failures(&state, &normalized_email).await;
+
+        session
     };
-    clear_login_failures(&state, &normalized_email).await;
 
     let code = random_token(32);
     let mut redirect = match Url::parse(&pending.redirect_uri) {
@@ -560,7 +627,7 @@ fn clear_csrf_cookie(response: &mut Response) {
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_static(
-            "mcp_auth_csrf=; Path=/oauth/authorize; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+            "mcp_auth_csrf=; Path=/oauth; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
         ),
     );
 }
@@ -840,8 +907,147 @@ async fn validate_authorize_request(
         code_challenge,
         scope,
         csrf_hash: String::new(),
+        consent_session_hash: None,
         expires_at: Utc::now() + Duration::minutes(PENDING_LOGIN_TTL_MINUTES),
     })
+}
+
+async fn bind_native_consent(
+    state: &OAuthState,
+    request_id: &str,
+    session: Option<&AuthenticatedSession>,
+) {
+    if let Some(pending) = state.inner.pending.write().await.get_mut(request_id) {
+        pending.consent_session_hash = session.map(|s| token_hash(&s.token));
+    }
+}
+
+fn native_host_matches(state: &OAuthState, headers: &HeaderMap) -> bool {
+    let Some(browser_url) = &state.inner.browser_url else {
+        return true;
+    };
+    let expected = Url::parse(browser_url).expect("validated browser URL");
+    let authority = &expected[url::Position::BeforeHost..url::Position::AfterPort];
+    headers.get(header::HOST).and_then(|h| h.to_str().ok()) == Some(authority)
+}
+
+// Native mode never accepts a browser-supplied identity or password. Docmost
+// validates its HttpOnly session cookie on every consent page and submission.
+async fn native_session(state: &OAuthState, headers: &HeaderMap) -> Option<AuthenticatedSession> {
+    let token = cookie_value(headers, "authToken")?;
+    let token = urlencoding::decode(&token).ok()?.into_owned();
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let response = http
+        .post(format!("{}/api/users/me", state.inner.docmost_base_url))
+        .bearer_auth(&token)
+        .json(&json!({}))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    let email = body
+        .pointer("/data/user/email")
+        .or_else(|| body.pointer("/user/email"))?
+        .as_str()?
+        .to_string();
+    Some(AuthenticatedSession {
+        base_url: state.inner.docmost_base_url.clone(),
+        email,
+        expires_at: crate::auth::manager::get_jwt_expiry_iso(&token),
+        token,
+    })
+}
+
+#[derive(Deserialize)]
+struct ResumeQuery {
+    request_id: String,
+}
+
+async fn resume_native_authorization(
+    State(state): State<OAuthState>,
+    Query(query): Query<ResumeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !native_host_matches(&state, &headers) {
+        return oauth_html_error(
+            StatusCode::BAD_REQUEST,
+            "Use the configured Docmost authorization origin.",
+        );
+    }
+    if state.inner.browser_url.is_none() {
+        return oauth_html_error(StatusCode::NOT_FOUND, "Native login is not enabled.");
+    }
+    let pending = state
+        .inner
+        .pending
+        .read()
+        .await
+        .get(&query.request_id)
+        .cloned();
+    let csrf = cookie_value(&headers, "mcp_auth_csrf").unwrap_or_default();
+    let client_name = pending.as_ref().and_then(|p| p.client_name.clone());
+    if !pending.is_some_and(|p| {
+        p.expires_at > Utc::now() && constant_time_equal(&token_hash(&csrf), &p.csrf_hash)
+    }) {
+        return oauth_html_error(
+            StatusCode::BAD_REQUEST,
+            "This authorization request has expired or its security check failed.",
+        );
+    }
+    let session = native_session(&state, &headers).await;
+    bind_native_consent(&state, &query.request_id, session.as_ref()).await;
+    hardened_auth_response(
+        Html(render_native_page(
+            &query.request_id,
+            &csrf,
+            session.as_ref(),
+            &state.inner.brand,
+            client_name.as_deref(),
+        ))
+        .into_response(),
+    )
+}
+
+fn render_native_page(
+    request_id: &str,
+    csrf: &str,
+    session: Option<&AuthenticatedSession>,
+    brand: &str,
+    client_name: Option<&str>,
+) -> String {
+    let client = display_client_name(client_name);
+    let brand = escape_html(brand);
+    let request_id = escape_html(request_id);
+    let csrf = escape_html(csrf);
+    let content = if let Some(session) = session {
+        format!(
+            r#"<h1>Connect {brand} to {client}</h1><p>Authorize as {} using your existing Docmost session.</p>
+<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{request_id}"><input type="hidden" name="csrf" value="{csrf}"><button type="submit">Authorize connection</button></form>
+<p>Your account's space permissions apply. Writes still require explicit confirmation.</p>"#,
+            escape_html(&session.email)
+        )
+    } else {
+        // Open the ordinary login in a tab: Docmost's SPA controls its own
+        // post-login navigation. This waiting document resumes independently,
+        // without requiring a patch to Docmost or sharing cookies across hosts.
+        format!(
+            r#"<meta http-equiv="refresh" content="3;url=/oauth/resume?request_id={request_id}">
+<h1>Sign in to {brand}</h1><p>Use the existing Docmost login screen. This page will continue once you have signed in.</p>
+<a href="/login" target="_blank" rel="noopener noreferrer">Open Docmost sign in</a>
+<p>After signing in, return to this tab to authorize the connection.</p>"#
+        )
+    };
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect {brand}</title>
+<style>body{{font-family:system-ui,sans-serif;background:#f5f6f8;display:grid;place-items:center;min-height:100vh;margin:0;color:#17202a}}main{{max-width:420px;background:white;padding:32px;border-radius:14px}}button,a{{display:inline-block;padding:12px;border:0;border-radius:8px;background:#202938;color:white;font:inherit;text-decoration:none}}p{{line-height:1.5}}</style></head><body><main>{content}</main></body></html>"#
+    )
 }
 
 fn render_login_page(request_id: &str, csrf: &str, error: Option<&str>, brand: &str) -> String {
@@ -1172,11 +1378,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_login_validates_cookie_and_requires_consent_and_csrf() -> anyhow::Result<()> {
+        async fn me(headers: HeaderMap) -> Response {
+            match headers
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+            {
+                Some("Bearer alice-session") => {
+                    Json(json!({"data":{"user":{"email":"alice@example.com"}}})).into_response()
+                }
+                Some("Bearer bob-session") => {
+                    Json(json!({"data":{"user":{"email":"bob@example.com"}}})).into_response()
+                }
+                _ => StatusCode::UNAUTHORIZED.into_response(),
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let mock = tokio::spawn(async move {
+            let _ = axum::serve(listener, Router::new().route("/api/users/me", post(me))).await;
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address_oauth = listener.local_addr()?;
+        let base = format!("http://{address_oauth}");
+        let state = OAuthState::new(OAuthConfig {
+            public_url: base.clone(),
+            docmost_base_url: format!("http://{address}"),
+            brand: DEFAULT_BRAND.to_string(),
+            browser_url: Some(base.clone()),
+        })?;
+        let server = {
+            let router = state.clone().routes();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            })
+        };
+        let client = Client::builder().redirect(Policy::none()).build()?;
+        let registration: TestRegistrationResponse = client.post(format!("{base}/oauth/register")).json(&json!({"redirect_uris":["https://client.example/callback"],"client_name":"Native test"})).send().await?.json().await?;
+        let metadata: serde_json::Value = client
+            .get(format!("{base}/.well-known/oauth-authorization-server"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(
+            metadata["authorization_endpoint"],
+            format!("{base}/oauth/authorize")
+        );
+        let verifier = "a".repeat(64);
+        let response = client
+            .get(format!("{base}/oauth/authorize"))
+            .query(&[
+                ("client_id", registration.client_id.as_str()),
+                ("response_type", "code"),
+                ("redirect_uri", "https://client.example/callback"),
+                ("code_challenge", pkce_challenge(&verifier).as_str()),
+                ("code_challenge_method", "S256"),
+            ])
+            .send()
+            .await?;
+        let csrf_cookie = response.headers()[SET_COOKIE]
+            .to_str()?
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let wait_html = response.text().await?;
+        assert!(wait_html.contains("href=\"/login\""));
+        assert!(!wait_html.contains("name=\"password\""));
+        assert!(!wait_html.contains("PREP"));
+        assert!(state.inner.codes.read().await.is_empty());
+        let request_id = state
+            .inner
+            .pending
+            .read()
+            .await
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let csrf = csrf_cookie.split_once('=').unwrap().1;
+        let resume = format!("{base}/oauth/resume?request_id={request_id}");
+        assert_eq!(
+            client.get(&resume).send().await?.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let invalid = client
+            .get(&resume)
+            .header(header::COOKIE, format!("{csrf_cookie}; authToken=forged"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(invalid.contains("Open Docmost sign in"));
+        let cookie = format!("{csrf_cookie}; authToken=alice-session");
+        let consent = client
+            .get(&resume)
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(consent.contains("alice@example.com"));
+        assert!(consent.contains("Native test"));
+        assert!(!consent.contains("name=\"password\""));
+        assert!(state.inner.codes.read().await.is_empty());
+        let form = [("request_id", request_id.as_str()), ("csrf", csrf)];
+        assert_eq!(
+            client
+                .post(format!("{base}/oauth/authorize"))
+                .form(&form)
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}/oauth/authorize"))
+                .header(header::COOKIE, &csrf_cookie)
+                .form(&form)
+                .send()
+                .await?
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Revalidate at POST and reject an account switch until fresh consent.
+        let bob_cookie = format!("{csrf_cookie}; authToken=bob-session");
+        assert_eq!(
+            client
+                .post(format!("{base}/oauth/authorize"))
+                .header(header::COOKIE, &bob_cookie)
+                .form(&form)
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let bob_consent = client
+            .get(&resume)
+            .header(header::COOKIE, &bob_cookie)
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(bob_consent.contains("bob@example.com"));
+        let response = client
+            .post(format!("{base}/oauth/authorize"))
+            .header(
+                header::COOKIE,
+                format!("{csrf_cookie}; authToken=bob-session"),
+            )
+            .form(&form)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let grants = state.inner.codes.read().await;
+        assert_eq!(grants.len(), 1);
+        let grant = grants.values().next().unwrap();
+        assert_eq!(grant.session.email, "bob@example.com");
+        assert_eq!(grant.code_challenge, pkce_challenge(&verifier));
+        drop(grants);
+        mock.abort();
+        server.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn native_browser_origin_and_rendering_are_guarded() {
+        let state = OAuthState::new(OAuthConfig {
+            public_url: "https://mcp.example.com".into(),
+            docmost_base_url: "http://docmost:3000".into(),
+            brand: DEFAULT_BRAND.into(),
+            browser_url: Some("https://docs.example.com".into()),
+        })
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("mcp.example.com"));
+        assert!(!native_host_matches(&state, &headers));
+        headers.insert(header::HOST, HeaderValue::from_static("docs.example.com"));
+        assert!(native_host_matches(&state, &headers));
+        let session = AuthenticatedSession {
+            base_url: "http://docmost:3000".into(),
+            email: "<script>".into(),
+            token: "secret".into(),
+            expires_at: None,
+        };
+        let html = render_native_page("id", "csrf", Some(&session), "Docmost", Some("<script>"));
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("secret"));
+    }
+    #[tokio::test]
     async fn repeated_login_failures_lock_one_account_without_touching_others() {
         let state = OAuthState::new(OAuthConfig {
             public_url: "http://localhost:8787".to_string(),
             docmost_base_url: "http://localhost:3000".to_string(),
             brand: DEFAULT_BRAND.to_string(),
+            browser_url: None,
         })
         .expect("state builds");
 
@@ -1230,6 +1628,7 @@ mod tests {
             public_url: format!("http://{oauth_address}"),
             docmost_base_url: format!("http://{docmost_address}"),
             brand: DEFAULT_BRAND.to_string(),
+            browser_url: None,
         })?;
         let oauth_task = {
             let app = oauth_state.clone().routes();
