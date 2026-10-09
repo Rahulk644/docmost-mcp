@@ -361,7 +361,7 @@ async fn authorize(
 ) -> Response {
     let pending = match validate_authorize_request(&state, query).await {
         Ok(pending) => pending,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     cleanup_expired(&state).await;
@@ -759,75 +759,75 @@ async fn issue_tokens(
 async fn validate_authorize_request(
     state: &OAuthState,
     query: AuthorizeQuery,
-) -> Result<PendingAuthorization, Response> {
+) -> Result<PendingAuthorization, Box<Response>> {
     if query.response_type != "code" {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "unsupported_response_type",
             "Only authorization code flow is supported.",
-        ));
+        )));
     }
     if query.code_challenge_method.as_deref() != Some("S256") {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "PKCE with code_challenge_method=S256 is required.",
-        ));
+        )));
     }
     let Some(code_challenge) = query.code_challenge else {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "code_challenge is required.",
-        ));
+        )));
     };
     if code_challenge.len() != 43
         || !code_challenge
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "code_challenge must be a 43-character base64url SHA-256 value.",
-        ));
+        )));
     }
     if query
         .resource
         .as_deref()
         .is_some_and(|resource| resource != state.inner.resource_url)
     {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_target",
             "The requested resource is not this MCP server.",
-        ));
+        )));
     }
     let scope = query.scope.unwrap_or_else(|| DEFAULT_SCOPE.to_string());
     if scope.split_whitespace().any(|value| value != DEFAULT_SCOPE)
         || !scope.split_whitespace().any(|value| value == DEFAULT_SCOPE)
     {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_scope",
             "The only supported scope is docmost.",
-        ));
+        )));
     }
 
     let clients = state.inner.clients.read().await;
     let Some(client) = clients.get(&query.client_id) else {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_client",
             "Register this MCP client before authorizing.",
-        ));
+        )));
     };
     if !client.redirect_uris.contains(&query.redirect_uri) {
-        return Err(oauth_json_error(
+        return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uri",
             "redirect_uri is not registered for this client.",
-        ));
+        )));
     }
 
     let client_name = client.client_name.clone();
