@@ -27,6 +27,16 @@ throttling, one-time authorization codes, and opaque tokens stored only as
 SHA-256 hashes. Grants live in memory, so a restart requires users to sign in
 again — deliberately.
 
+Dynamic client registration is open (as MCP clients expect) but stores
+nothing: the issued `client_id` carries the client's redirect URIs and name,
+signed with HMAC-SHA256, and is verified at authorization. Anonymous
+registrations therefore cannot exhaust memory or lock out real clients. The
+signing key is created on first start in `~/.docmost-local-mcp/client-id.key`
+(mode 0600; override with `DOCMOST_MCP_CLIENT_ID_KEY_FILE`) and survives
+restarts, because clients cache their `client_id` and do not re-register on
+their own. Deleting the file invalidates every issued `client_id`; affected
+clients must clear their stored authentication and connect again.
+
 ## Supported boundary
 
 The default configuration is for a single machine: loopback HTTP, exact Host and

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -13,6 +14,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -31,7 +33,14 @@ const PENDING_LOGIN_TTL_MINUTES: i64 = 10;
 const ACCESS_TOKEN_TTL_MINUTES: i64 = 60;
 const LOGIN_FAILURE_WINDOW_MINUTES: i64 = 15;
 const MAX_LOGIN_FAILURES_PER_ACCOUNT: usize = 5;
-const MAX_REGISTERED_CLIENTS: usize = 1_024;
+/// Upper bound on a registration's serialized metadata (redirect URIs plus
+/// name). The metadata travels inside the client_id, which travels in URLs.
+const MAX_CLIENT_METADATA_BYTES: usize = 2_048;
+/// Anything longer cannot have been issued here (see MAX_CLIENT_METADATA_BYTES),
+/// so it is rejected before any decoding work.
+const MAX_CLIENT_ID_LENGTH: usize = 4_096;
+/// Versions the client_id format so it can change without misreading old IDs.
+const CLIENT_ID_PREFIX: &str = "dmc1";
 const MAX_PENDING_AUTHORIZATIONS: usize = 4_096;
 const MAX_COMPLETED_AUTHORIZATIONS: usize = 4_096;
 const MAX_ACCESS_GRANTS: usize = 8_192;
@@ -54,6 +63,12 @@ pub struct OAuthConfig {
     pub brand: String,
     /// Public Docmost origin, with /oauth/* forwarded to this server.
     pub browser_url: Option<String>,
+    /// File holding the key that signs client_ids, created on first start.
+    /// Persisting it keeps issued client_ids valid across restarts: clients
+    /// cache their client_id and go straight to /oauth/authorize, so a new
+    /// key would strand them on an `invalid_client` page. None generates a
+    /// key per process (tests).
+    pub client_id_key_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -67,7 +82,8 @@ struct OAuthInner {
     resource_url: String,
     docmost_base_url: String,
     brand: String,
-    clients: RwLock<HashMap<String, RegisteredClient>>,
+    /// Signs client_ids (see OAuthConfig::client_id_key_path).
+    client_id_key: [u8; 32],
     pending: RwLock<HashMap<String, PendingAuthorization>>,
     completed: RwLock<HashMap<String, CompletedAuthorization>>,
     codes: RwLock<HashMap<String, AuthorizationCode>>,
@@ -76,11 +92,17 @@ struct OAuthInner {
     login_failures: RwLock<HashMap<String, Vec<DateTime<Utc>>>>,
 }
 
-#[derive(Clone)]
+/// A dynamically registered client. Registrations are not stored: the
+/// client_id is the registration, signed (see `issue_client_id`), so
+/// anonymous registration cannot exhaust server memory or lock out real
+/// clients. Nothing is kept for a client until someone authorizes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RegisteredClient {
+    #[serde(rename = "r")]
     redirect_uris: Vec<String>,
     /// Self-declared at registration, so it is untrusted input and is always
     /// escaped before it reaches a page.
+    #[serde(rename = "n", default, skip_serializing_if = "Option::is_none")]
     client_name: Option<String>,
 }
 
@@ -203,7 +225,10 @@ impl OAuthState {
                 public_url,
                 docmost_base_url: normalize_base_url(&config.docmost_base_url),
                 brand: normalize_brand(&config.brand),
-                clients: RwLock::new(HashMap::new()),
+                client_id_key: match &config.client_id_key_path {
+                    Some(path) => load_or_create_client_id_key(path)?,
+                    None => random_key(),
+                },
                 pending: RwLock::new(HashMap::new()),
                 completed: RwLock::new(HashMap::new()),
                 codes: RwLock::new(HashMap::new()),
@@ -332,16 +357,6 @@ async fn register_client(
         );
     }
 
-    let mut clients = state.inner.clients.write().await;
-    if clients.len() >= MAX_REGISTERED_CLIENTS {
-        return oauth_json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "temporarily_unavailable",
-            "Client registration capacity is temporarily exhausted.",
-        );
-    }
-
-    let client_id = random_token(24);
     let issued_at = Utc::now().timestamp();
     let client = RegisteredClient {
         redirect_uris: request.redirect_uris.clone(),
@@ -352,8 +367,13 @@ async fn register_client(
             .filter(|name| !name.is_empty())
             .map(str::to_string),
     };
-    clients.insert(client_id.clone(), client);
-    drop(clients);
+    let Some(client_id) = issue_client_id(&state.inner.client_id_key, &client) else {
+        return oauth_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            "The redirect URIs and client name are too long in total.",
+        );
+    };
 
     (
         StatusCode::CREATED,
@@ -881,8 +901,7 @@ async fn validate_authorize_request(
         )));
     }
 
-    let clients = state.inner.clients.read().await;
-    let Some(client) = clients.get(&query.client_id) else {
+    let Some(client) = decode_client_id(&state.inner.client_id_key, &query.client_id) else {
         return Err(Box::new(oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_client",
@@ -897,7 +916,7 @@ async fn validate_authorize_request(
         )));
     }
 
-    let client_name = client.client_name.clone();
+    let client_name = client.client_name;
 
     Ok(PendingAuthorization {
         client_id: query.client_id,
@@ -1159,6 +1178,99 @@ fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
+fn random_key() -> [u8; 32] {
+    let mut key = [0_u8; 32];
+    OsRng.fill_bytes(&mut key);
+    key
+}
+
+/// Reads the 32-byte client_id key, creating it (mode 0600, directory 0700)
+/// if absent. Creation is exclusive, so concurrent first starts agree on one
+/// key.
+fn load_or_create_client_id_key(path: &Path) -> anyhow::Result<[u8; 32]> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            return bytes.try_into().map_err(|bytes: Vec<u8>| {
+                anyhow::anyhow!(
+                    "{} must hold exactly 32 bytes (found {}); delete it to generate a new key",
+                    path.display(),
+                    bytes.len()
+                )
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to read {}", path.display()));
+        }
+    }
+
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+            .create(dir)
+            .with_context(|| format!("Failed to create {}", dir.display()))?;
+    }
+    let key = random_key();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(&key)
+                .and_then(|()| file.sync_all())
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(key)
+        }
+        // Another process created it first: use theirs.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            load_or_create_client_id_key(path)
+        }
+        Err(error) => Err(error).with_context(|| format!("Failed to create {}", path.display())),
+    }
+}
+
+/// `dmc1.<base64url JSON metadata>.<base64url HMAC-SHA256 of the first two
+/// parts>`. None when the metadata exceeds MAX_CLIENT_METADATA_BYTES.
+fn issue_client_id(key: &[u8; 32], client: &RegisteredClient) -> Option<String> {
+    let metadata = serde_json::to_vec(client).ok()?;
+    if metadata.len() > MAX_CLIENT_METADATA_BYTES {
+        return None;
+    }
+    let signed = format!("{CLIENT_ID_PREFIX}.{}", URL_SAFE_NO_PAD.encode(metadata));
+    let tag = URL_SAFE_NO_PAD.encode(client_id_mac(key, &signed).finalize().into_bytes());
+    Some(format!("{signed}.{tag}"))
+}
+
+/// The registration a client_id carries, if this server issued it (under the
+/// current key) and it is unmodified.
+fn decode_client_id(key: &[u8; 32], client_id: &str) -> Option<RegisteredClient> {
+    if client_id.len() > MAX_CLIENT_ID_LENGTH {
+        return None;
+    }
+    let (signed, tag) = client_id.rsplit_once('.')?;
+    let (prefix, metadata) = signed.split_once('.')?;
+    if prefix != CLIENT_ID_PREFIX {
+        return None;
+    }
+    let tag = URL_SAFE_NO_PAD.decode(tag).ok()?;
+    // Constant-time comparison.
+    client_id_mac(key, signed).verify_slice(&tag).ok()?;
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(metadata).ok()?).ok()
+}
+
+fn client_id_mac(key: &[u8; 32], signed: &str) -> Hmac<Sha256> {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
+    mac.update(signed.as_bytes());
+    mac
+}
+
 fn token_hash(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
@@ -1331,6 +1443,152 @@ mod tests {
         assert!(!valid_redirect_uri("javascript:alert(1)"));
     }
 
+    fn test_client() -> RegisteredClient {
+        RegisteredClient {
+            redirect_uris: vec!["http://127.0.0.1:53682/callback".into()],
+            client_name: Some("Test client".into()),
+        }
+    }
+
+    #[test]
+    fn client_ids_carry_their_registration() {
+        let key = [7_u8; 32];
+        let client = test_client();
+        let client_id = issue_client_id(&key, &client).expect("small metadata is accepted");
+        assert!(client_id.starts_with("dmc1."));
+        assert_eq!(decode_client_id(&key, &client_id), Some(client));
+    }
+
+    #[test]
+    fn client_ids_reject_tampering_and_foreign_keys() {
+        let key = [7_u8; 32];
+        let client_id = issue_client_id(&key, &test_client()).unwrap();
+        let (signed, _) = client_id.rsplit_once('.').unwrap();
+
+        // Signed by another server (or before a restart).
+        assert_eq!(decode_client_id(&[8_u8; 32], &client_id), None);
+        // Redirect URIs swapped for an attacker's, keeping the old tag.
+        let forged = issue_client_id(
+            &key,
+            &RegisteredClient {
+                redirect_uris: vec!["https://attacker.example/callback".into()],
+                client_name: None,
+            },
+        )
+        .unwrap();
+        let forged_metadata = forged.split('.').nth(1).unwrap();
+        let tag = client_id.rsplit_once('.').unwrap().1;
+        assert_eq!(
+            decode_client_id(&key, &format!("dmc1.{forged_metadata}.{tag}")),
+            None
+        );
+        // Truncated or malformed.
+        assert_eq!(decode_client_id(&key, signed), None);
+        assert_eq!(decode_client_id(&key, &format!("{signed}.")), None);
+        assert_eq!(
+            decode_client_id(&key, &client_id.replacen("dmc1", "dmc2", 1)),
+            None
+        );
+        assert_eq!(
+            decode_client_id(&key, &"a".repeat(MAX_CLIENT_ID_LENGTH + 1)),
+            None
+        );
+        assert_eq!(decode_client_id(&key, ""), None);
+    }
+
+    #[test]
+    fn client_id_key_persists_across_restarts() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state/client-id.key");
+        let first = load_or_create_client_id_key(&path)?;
+        let client_id = issue_client_id(&first, &test_client()).unwrap();
+
+        // A restart reads the same key, so the cached client_id still works.
+        let second = load_or_create_client_id_key(&path)?;
+        assert_eq!(first, second);
+        assert_eq!(decode_client_id(&second, &client_id), Some(test_client()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+            let parent = std::fs::metadata(path.parent().unwrap())?;
+            assert_eq!(parent.permissions().mode() & 0o777, 0o700);
+        }
+
+        std::fs::write(&path, b"short")?;
+        assert!(load_or_create_client_id_key(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_client_metadata_is_refused() {
+        let client = RegisteredClient {
+            redirect_uris: (0..10)
+                .map(|i| format!("https://client.example/{i}/{}", "x".repeat(300)))
+                .collect(),
+            client_name: None,
+        };
+        assert_eq!(issue_client_id(&[7_u8; 32], &client), None);
+    }
+
+    #[tokio::test]
+    async fn registration_has_no_capacity_limit_and_stores_nothing() -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let state = OAuthState::new(OAuthConfig {
+            public_url: base.clone(),
+            docmost_base_url: "http://127.0.0.1:9".into(),
+            brand: DEFAULT_BRAND.into(),
+            browser_url: None,
+            client_id_key_path: None,
+        })?;
+        let router = state.clone().routes();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let client = Client::builder().redirect(Policy::none()).build()?;
+
+        // Well past the old 1,024-client cap.
+        let mut last = None;
+        for i in 0..1_100 {
+            let response = client
+                .post(format!("{base}/oauth/register"))
+                .json(&json!({"redirect_uris": [format!("http://127.0.0.1:{}/cb", 1_000 + i)]}))
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            last = Some(response.json::<TestRegistrationResponse>().await?.client_id);
+        }
+
+        // The last registration still authorizes; a tampered one does not.
+        let challenge = pkce_challenge("verifier-verifier-verifier-verifier-verifier");
+        let authorize = |client_id: String| {
+            client
+                .get(format!("{base}/oauth/authorize"))
+                .query(&[
+                    ("response_type", "code"),
+                    ("client_id", client_id.as_str()),
+                    ("redirect_uri", "http://127.0.0.1:2099/cb"),
+                    ("code_challenge", challenge.as_str()),
+                    ("code_challenge_method", "S256"),
+                ])
+                .send()
+        };
+        let last = last.unwrap();
+        assert_eq!(authorize(last.clone()).await?.status(), StatusCode::OK);
+        let tampered = format!("{}A", last);
+        let response = authorize(tampered).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.text().await?.contains("invalid_client"));
+
+        server.abort();
+        Ok(())
+    }
+
     #[test]
     fn public_url_requires_https_outside_loopback() {
         assert!(normalize_public_url("https://mcp.example").is_ok());
@@ -1406,6 +1664,7 @@ mod tests {
             docmost_base_url: format!("http://{address}"),
             brand: DEFAULT_BRAND.to_string(),
             browser_url: Some(base.clone()),
+            client_id_key_path: None,
         })?;
         let server = {
             let router = state.clone().routes();
@@ -1551,6 +1810,7 @@ mod tests {
             docmost_base_url: "http://docmost:3000".into(),
             brand: DEFAULT_BRAND.into(),
             browser_url: Some("https://docs.example.com".into()),
+            client_id_key_path: None,
         })
         .unwrap();
         let mut headers = HeaderMap::new();
@@ -1575,6 +1835,7 @@ mod tests {
             docmost_base_url: "http://localhost:3000".to_string(),
             brand: DEFAULT_BRAND.to_string(),
             browser_url: None,
+            client_id_key_path: None,
         })
         .expect("state builds");
 
@@ -1629,6 +1890,7 @@ mod tests {
             docmost_base_url: format!("http://{docmost_address}"),
             brand: DEFAULT_BRAND.to_string(),
             browser_url: None,
+            client_id_key_path: None,
         })?;
         let oauth_task = {
             let app = oauth_state.clone().routes();
