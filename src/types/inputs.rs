@@ -268,3 +268,28 @@ pub struct UpdateCommentInput {
     )]
     pub markdown: String,
 }
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BeginUploadInput {
+    #[schemars(description = "Must be true after the user reviews and approves this mutation.")]
+    pub confirm: bool,
+    #[schemars(
+        description = "The Docmost page ID or slug ID to attach the file to. Requires edit access to the page."
+    )]
+    pub page_id: String,
+    #[schemars(
+        description = "File name including its extension, e.g. `diagram.png`. No path separators. Docmost may normalise the name (spaces become underscores); use the name the upload returns."
+    )]
+    pub file_name: String,
+    #[schemars(description = "The file's exact size in bytes.")]
+    pub size: u64,
+    #[schemars(
+        description = "The file's SHA-256 as 64 hex characters, e.g. from `sha256sum`. The upload is refused unless the bytes sent match it."
+    )]
+    pub sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional MIME type, e.g. `image/png`. Defaults to `application/octet-stream`."
+    )]
+    pub mime_type: Option<String>,
+}

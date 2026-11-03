@@ -53,6 +53,7 @@ async fn server_lists_expected_tools() -> Result<()> {
         "docmost_update_space",
         "docmost_create_comment",
         "docmost_update_comment",
+        "docmost_begin_upload",
     ] {
         assert!(
             tool_names.iter().any(|name| name == expected),
@@ -63,7 +64,7 @@ async fn server_lists_expected_tools() -> Result<()> {
     // Exactly the expected surface: no accidental extra/duplicate registration.
     assert_eq!(
         tool_names.len(),
-        20,
+        21,
         "unexpected tool count: {tool_names:?}"
     );
     let mut unique = tool_names.clone();
@@ -193,6 +194,11 @@ async fn server_required_input_fields_are_present() -> Result<()> {
         ("docmost_update_space", "confirm"),
         ("docmost_create_comment", "confirm"),
         ("docmost_update_comment", "confirm"),
+        ("docmost_begin_upload", "page_id"),
+        ("docmost_begin_upload", "file_name"),
+        ("docmost_begin_upload", "size"),
+        ("docmost_begin_upload", "sha256"),
+        ("docmost_begin_upload", "confirm"),
     ] {
         let tool = tools
             .tools
@@ -220,6 +226,60 @@ async fn server_required_input_fields_are_present() -> Result<()> {
             "{tool_name}.{property_name} should be required"
         );
     }
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_begin_upload_validates_then_enforces_write_gate() -> Result<()> {
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+
+    let server_handle = tokio::spawn(async move {
+        // Writes are not enabled in this test process (DOCMOST_MCP_ENABLE_WRITES unset).
+        let server = DocmostMcpServer::new(StartupConfig::default())?.with_stager(Some(
+            docmost_mcp::staged_upload::UploadStager::new("https://mcp.example.com", 1024),
+        ));
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+
+    let client = DummyClientHandler.serve(client_transport).await?;
+    // SHA-256 of b"hi".
+    const HI_SHA256: &str = "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4";
+    let call = |file_name: &str, size: u64, sha256: &str| {
+        let arguments = serde_json::json!({
+            "confirm": true,
+            "page_id": "page-1",
+            "file_name": file_name,
+            "size": size,
+            "sha256": sha256,
+        });
+        CallToolRequestParams::new("docmost_begin_upload")
+            .with_arguments(arguments.as_object().cloned().unwrap())
+    };
+
+    // Malformed arguments are rejected on their own merits, before the write gate.
+    let bad_path = client.call_tool(call("../x.txt", 2, HI_SHA256)).await;
+    assert!(
+        format!("{bad_path:?}").contains("not a path"),
+        "{bad_path:?}"
+    );
+    let bad_hash = client.call_tool(call("x.txt", 2, "not-hex")).await;
+    assert!(
+        format!("{bad_hash:?}").contains("Invalid sha256"),
+        "{bad_hash:?}"
+    );
+    let too_big = client.call_tool(call("x.txt", 2048, HI_SHA256)).await;
+    assert!(format!("{too_big:?}").contains("too large"), "{too_big:?}");
+
+    // A well-formed call is still refused while writes are disabled.
+    let disabled = client.call_tool(call("x.txt", 2, HI_SHA256)).await;
+    assert!(
+        format!("{disabled:?}").contains("DOCMOST_MCP_ENABLE_WRITES"),
+        "{disabled:?}"
+    );
 
     client.cancel().await?;
     server_handle.await??;

@@ -1122,7 +1122,7 @@ fn hardened_auth_response(mut response: Response) -> Response {
     response
 }
 
-fn normalize_public_url(value: &str) -> anyhow::Result<String> {
+pub(crate) fn normalize_public_url(value: &str) -> anyhow::Result<String> {
     let parsed = Url::parse(value)?;
     if parsed.scheme() != "https" && !is_loopback_host(parsed.host_str()) {
         anyhow::bail!("DOCMOST_MCP_PUBLIC_URL must use HTTPS outside localhost");
@@ -1153,13 +1153,13 @@ fn is_loopback_host(host: Option<&str>) -> bool {
     matches!(host, Some("localhost" | "127.0.0.1" | "::1"))
 }
 
-fn random_token(bytes: usize) -> String {
+pub(crate) fn random_token(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
     OsRng.fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 

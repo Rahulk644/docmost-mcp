@@ -53,6 +53,18 @@ All notable changes are documented here. The format loosely follows
   `move_page` and `create_page`.
 
 ### Added
+- **`docmost_begin_upload`** uploads a file to a page as a normal Docmost attachment,
+  through the same `POST /api/files/upload` call the editor makes, without the bytes
+  passing through the model. It returns a single-use URL; the client `PUT`s the raw
+  file there, and the server uploads it only if the declared size and SHA-256 match.
+  The response gives the attachment ID, the Docmost-normalized file name and the
+  relative `/api/files/{id}/{name}` path to embed or link from page Markdown. Slug IDs
+  are resolved to the page UUID first: Docmost 0.96 accepts a slug for its permission
+  check but then fails to store the attachment. The URL is a
+  256-bit, hash-stored, single-use token that expires after 10 minutes and carries
+  only the session that created it. Needs the HTTP transport and
+  `DOCMOST_MCP_PUBLIC_URL`; the size limit is `DOCMOST_MCP_MAX_UPLOAD_BYTES` (50 MiB by
+  default), since the body no longer goes through the 4 MiB transport limit.
 - CI: `cargo fmt --check`, strict `clippy -D warnings`, the test suite, a
   **production image build with a runtime smoke test**, and a dependency-advisory
   audit. The image build is what catches a broken `Dockerfile` COPY path — the
