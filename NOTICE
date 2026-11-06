@@ -1,0 +1,8 @@
+docmost-mcp
+
+Copyright (c) 2026 Rahul Khatri. Licensed under the MIT License (see LICENSE).
+
+Portions of this software are derived from docmost-local-mcp
+(https://github.com/wisflux/docmost-local-mcp), Copyright (c) its contributors,
+used under the MIT License. See UPSTREAM.md for the exact upstream commit and
+the scope of subsequent changes.
