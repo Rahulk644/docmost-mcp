@@ -39,7 +39,10 @@ All notable changes are documented here. The format loosely follows
   `/oauth/authorize`) hit `invalid_client` until their stored authentication
   was cleared by hand. The signing key is persisted to
   `~/.docmost-local-mcp/client-id.key` (0600, created on first start;
-  `DOCMOST_MCP_CLIENT_ID_KEY_FILE` overrides the path).
+  `DOCMOST_MCP_CLIENT_ID_KEY_FILE` overrides the path). The key is published
+  atomically (written and synced under a temporary name, then hard-linked into
+  place), so replicas starting together against an empty volume all load the
+  same complete key.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**
   Every cursor-based list tool accepted a `cursor`, but responses were folded into
   a bare `Vec` that discarded the rest — so nothing ever told the caller what the

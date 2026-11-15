@@ -35,7 +35,11 @@ signing key is created on first start in `~/.docmost-local-mcp/client-id.key`
 (mode 0600; override with `DOCMOST_MCP_CLIENT_ID_KEY_FILE`) and survives
 restarts, because clients cache their `client_id` and do not re-register on
 their own. Deleting the file invalidates every issued `client_id`; affected
-clients must clear their stored authentication and connect again.
+clients must clear their stored authentication and connect again. Replicas
+that share the file's volume agree on one key: it is written in full to a
+temporary file, synced, and hard-linked into place, which never replaces a key
+another process already published, so no process can read a partial key. The
+volume must support hard links.
 
 ## Supported boundary
 

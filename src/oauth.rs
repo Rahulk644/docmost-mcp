@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -24,6 +24,7 @@ use url::Url;
 
 use crate::{
     auth::manager::AuthManager,
+    key_file,
     startup_config::normalize_base_url,
     types::{AuthenticatedSession, LoginInput},
 };
@@ -226,8 +227,8 @@ impl OAuthState {
                 docmost_base_url: normalize_base_url(&config.docmost_base_url),
                 brand: normalize_brand(&config.brand),
                 client_id_key: match &config.client_id_key_path {
-                    Some(path) => load_or_create_client_id_key(path)?,
-                    None => random_key(),
+                    Some(path) => key_file::load_or_create_key(path)?,
+                    None => key_file::random_key(),
                 },
                 pending: RwLock::new(HashMap::new()),
                 completed: RwLock::new(HashMap::new()),
@@ -1186,64 +1187,6 @@ fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
-fn random_key() -> [u8; 32] {
-    let mut key = [0_u8; 32];
-    OsRng.fill_bytes(&mut key);
-    key
-}
-
-/// Reads the 32-byte client_id key, creating it (mode 0600, directory 0700)
-/// if absent. Creation is exclusive, so concurrent first starts agree on one
-/// key.
-fn load_or_create_client_id_key(path: &Path) -> anyhow::Result<[u8; 32]> {
-    use anyhow::Context as _;
-    use std::io::Write as _;
-
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            return bytes.try_into().map_err(|bytes: Vec<u8>| {
-                anyhow::anyhow!(
-                    "{} must hold exactly 32 bytes (found {}); delete it to generate a new key",
-                    path.display(),
-                    bytes.len()
-                )
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("Failed to read {}", path.display()));
-        }
-    }
-
-    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder
-            .create(dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
-    }
-    let key = random_key();
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(path) {
-        Ok(mut file) => {
-            file.write_all(&key)
-                .and_then(|()| file.sync_all())
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            Ok(key)
-        }
-        // Another process created it first: use theirs.
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            load_or_create_client_id_key(path)
-        }
-        Err(error) => Err(error).with_context(|| format!("Failed to create {}", path.display())),
-    }
-}
-
 /// `dmc1.<base64url JSON metadata>.<base64url HMAC-SHA256 of the first two
 /// parts>`. None when the metadata exceeds MAX_CLIENT_METADATA_BYTES.
 fn issue_client_id(key: &[u8; 32], client: &RegisteredClient) -> Option<String> {
@@ -1461,6 +1404,7 @@ mod tests {
             docmost_base_url: "http://docmost:3000".into(),
             brand: DEFAULT_BRAND.into(),
             browser_url: None,
+            client_id_key_path: None,
         })?
         .routes();
         let mut documents = Vec::new();
@@ -1537,28 +1481,26 @@ mod tests {
     #[test]
     fn client_id_key_persists_across_restarts() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("state/client-id.key");
-        let first = load_or_create_client_id_key(&path)?;
-        let client_id = issue_client_id(&first, &test_client()).unwrap();
+        let config = || OAuthConfig {
+            public_url: "https://mcp.example.com".into(),
+            docmost_base_url: "http://docmost:3000".into(),
+            brand: DEFAULT_BRAND.into(),
+            browser_url: None,
+            client_id_key_path: Some(dir.path().join("state/client-id.key")),
+        };
+        let first = OAuthState::new(config())?;
+        let client_id = issue_client_id(&first.inner.client_id_key, &test_client()).unwrap();
 
         // A restart reads the same key, so the cached client_id still works.
-        let second = load_or_create_client_id_key(&path)?;
-        assert_eq!(first, second);
-        assert_eq!(decode_client_id(&second, &client_id), Some(test_client()));
+        let second = OAuthState::new(config())?;
+        assert_eq!(
+            decode_client_id(&second.inner.client_id_key, &client_id),
+            Some(test_client())
+        );
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&path)?.permissions().mode() & 0o777,
-                0o600
-            );
-            let parent = std::fs::metadata(path.parent().unwrap())?;
-            assert_eq!(parent.permissions().mode() & 0o777, 0o700);
-        }
-
-        std::fs::write(&path, b"short")?;
-        assert!(load_or_create_client_id_key(&path).is_err());
+        // A damaged key stops startup instead of being replaced.
+        std::fs::write(dir.path().join("state/client-id.key"), b"short")?;
+        assert!(OAuthState::new(config()).is_err());
         Ok(())
     }
 
