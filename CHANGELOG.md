@@ -37,6 +37,9 @@ All notable changes are documented here. The format loosely follows
   the same 401, and refresh is refused. A refresh also checks the session with
   Docmost, so a client that refreshes before calling a tool is not handed fresh
   tokens for a dead session.
+  Authorization, token issuance and tool calls share one session-expiry cutoff
+  (two minutes), so a grant is never issued for a session the first tool call
+  would revoke.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**
   Every cursor-based list tool accepted a `cursor`, but responses were folded into
   a bare `Vec` that discarded the rest — so nothing ever told the caller what the

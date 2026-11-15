@@ -28,7 +28,13 @@ use crate::{
     },
 };
 
-const REFRESH_WINDOW_MS: i64 = 2 * 60 * 1000;
+/// How close to expiry a Docmost session may get before it counts as expired.
+///
+/// One cutoff for every path that decides whether a session is still usable:
+/// the OAuth authorization page, token issuance, and the tool-call path.
+/// Sharing it guarantees a grant is never issued for a session that the first
+/// tool call would immediately treat as expired and revoke.
+pub const SESSION_EXPIRY_CUTOFF_MS: i64 = 2 * 60 * 1000;
 static AUTH_TOKEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?:^|,\s*)authToken=([^;]+)").expect("valid auth token regex"));
 
@@ -385,26 +391,24 @@ fn to_authenticated_session(config: StoredConfig, session: StoredSession) -> Aut
     }
 }
 
-fn is_session_expiring(session: &StoredSession) -> bool {
-    let Some(expires_at) = &session.expires_at else {
+/// True when `expires_at` (RFC 3339) is within [`SESSION_EXPIRY_CUTOFF_MS`] of
+/// now. A missing or unparseable expiry is treated as not expiring.
+pub fn session_expires_within_cutoff(expires_at: Option<&str>) -> bool {
+    let Some(expires_at) = expires_at else {
         return false;
     };
-
     let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
         return false;
     };
+    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= SESSION_EXPIRY_CUTOFF_MS
+}
 
-    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+fn is_session_expiring(session: &StoredSession) -> bool {
+    session_expires_within_cutoff(session.expires_at.as_deref())
 }
 
 fn authenticated_session_is_expiring(session: &AuthenticatedSession) -> bool {
-    let Some(expires_at) = &session.expires_at else {
-        return false;
-    };
-    let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
-        return false;
-    };
-    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+    session_expires_within_cutoff(session.expires_at.as_deref())
 }
 
 async fn exchange_credentials(http: &Client, input: &LoginInput) -> Result<AuthenticatedSession> {

@@ -880,7 +880,7 @@ async fn issue_tokens(
     let access_expiry = docmost_expiry
         .map(|expiry| expiry.min(now + Duration::minutes(ACCESS_TOKEN_TTL_MINUTES)))
         .unwrap_or(now + Duration::minutes(ACCESS_TOKEN_TTL_MINUTES));
-    if access_expiry <= now + Duration::seconds(30) {
+    if crate::auth::manager::session_expires_within_cutoff(session.expires_at.as_deref()) {
         return oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
@@ -1057,10 +1057,16 @@ async fn native_session(state: &OAuthState, headers: &HeaderMap) -> Option<Authe
         .or_else(|| body.pointer("/user/email"))?
         .as_str()?
         .to_string();
+    let expires_at = crate::auth::manager::get_jwt_expiry_iso(&token);
+    // Same cutoff as token issuance and tool calls: don't authorize a session
+    // that would be treated as expired the moment it is used.
+    if crate::auth::manager::session_expires_within_cutoff(expires_at.as_deref()) {
+        return None;
+    }
     Some(AuthenticatedSession {
         base_url: state.inner.docmost_base_url.clone(),
         email,
-        expires_at: crate::auth::manager::get_jwt_expiry_iso(&token),
+        expires_at,
         token,
     })
 }
@@ -1458,6 +1464,58 @@ mod tests {
         }
         assert_eq!(documents[0], documents[1]);
         assert_eq!(documents[0]["resource"], "https://mcp.example.com/mcp");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_near_expiry_is_refused_at_issuance_and_by_the_tool_call_path()
+    -> anyhow::Result<()> {
+        use crate::auth::manager::AuthManager;
+
+        let state = OAuthState::new(OAuthConfig {
+            public_url: "https://mcp.example.com".into(),
+            docmost_base_url: "http://docmost:3000".into(),
+            brand: DEFAULT_BRAND.into(),
+            browser_url: None,
+        })?;
+        let session_with = |remaining: Duration| AuthenticatedSession {
+            base_url: "http://docmost:3000".into(),
+            email: "a@example.com".into(),
+            token: "tok".into(),
+            expires_at: Some((Utc::now() + remaining).to_rfc3339()),
+        };
+
+        // About one minute left: inside the shared cutoff. Issuance must refuse
+        // it, because the first tool call would revoke it straight away.
+        let near = session_with(Duration::minutes(1));
+        let response =
+            issue_tokens(&state, "c".into(), DEFAULT_SCOPE.into(), near.clone(), true).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.inner.access_tokens.read().await.is_empty());
+        assert!(
+            AuthManager::from_session(near)?
+                .get_authenticated_session()
+                .await
+                .is_err()
+        );
+
+        // Comfortably outside the cutoff: both paths accept it.
+        let healthy = session_with(Duration::minutes(10));
+        let response = issue_tokens(
+            &state,
+            "c".into(),
+            DEFAULT_SCOPE.into(),
+            healthy.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            AuthManager::from_session(healthy)?
+                .get_authenticated_session()
+                .await
+                .is_ok()
+        );
         Ok(())
     }
 
