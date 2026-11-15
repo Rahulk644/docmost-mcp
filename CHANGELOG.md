@@ -24,6 +24,23 @@ All notable changes are documented here. The format loosely follows
   was served. Clients that follow the 401's `resource_metadata` were fine;
   clients that construct the RFC 9728 URL themselves got a 404. Both paths now
   serve the same document.
+- **A server restart no longer signs every account-auth user out.** Refresh
+  tokens lived only in memory, so after a restart or redeploy every client's
+  refresh failed with `invalid_grant` and each user had to authorize again by
+  hand. Refresh tokens are now sealed with AES-256-GCM and held by the client:
+  nothing is stored for them server-side, and the Docmost session they carry
+  is never written to the server's disk. The key is created on first start in
+  `~/.docmost-local-mcp/refresh-token.key` (0600; `DOCMOST_MCP_REFRESH_KEY_FILE`
+  overrides the path); deleting it invalidates every refresh token. Refresh
+  tokens stay single-use, and replaying a spent one now revokes the whole
+  rotation. Which tokens are spent or revoked (no sessions or tokens) is
+  recorded in `~/.docmost-local-mcp/refresh-token-families.jsonl`
+  (`DOCMOST_MCP_REFRESH_STATE_FILE` overrides), so both survive restarts; a
+  token is spent only once its replacement is issued, so a temporary failure
+  does not burn it. The key is published atomically, so replicas starting
+  together agree on it. Each refresh first checks the session with Docmost, so signing out
+  of Docmost also ends the MCP connection at its next refresh. Access tokens
+  remain in memory; after a restart clients get a 401 and refresh.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**
   Every cursor-based list tool accepted a `cursor`, but responses were folded into
   a bare `Vec` that discarded the rest — so nothing ever told the caller what the
