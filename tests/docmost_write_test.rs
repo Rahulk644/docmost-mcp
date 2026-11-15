@@ -49,6 +49,8 @@ struct CapturedState {
     /// When true, the upload route stores the file but replies with something that isn't
     /// an attachment, like a proxy page or a truncated response.
     garble_upload: Arc<AtomicBool>,
+    /// The `message` the upload route puts in a forced error reply (default "injected failure").
+    force_message: Arc<Mutex<String>>,
     /// How many times the mock `/api/auth/login` endpoint was called.
     login_hits: Arc<AtomicUsize>,
 }
@@ -215,7 +217,13 @@ async fn upload_route(
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if let Some(status) = injected_status(&state, &state.upload_attempts) {
-        return (status, Json(json!({ "message": "injected failure" })));
+        let message = state.force_message.lock().unwrap().clone();
+        let message = if message.is_empty() {
+            "injected failure".to_string()
+        } else {
+            message
+        };
+        return (status, Json(json!({ "message": message })));
     }
     if state.stall_upload.load(Ordering::SeqCst) {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -705,6 +713,48 @@ async fn upload_attachment_surfaces_server_error() -> Result<()> {
     Ok(())
 }
 
+/// Docmost 0.96's upload handler answers 400 both before storage and after the storage
+/// layer has run, so only its pre-storage messages prove nothing was stored.
+#[tokio::test]
+async fn upload_attachment_classifies_a_400_by_its_message() -> Result<()> {
+    let temp = TempDir::new()?;
+    let (client, state, _) = spawn(&temp).await?;
+    for (message, unknown) in [
+        ("Failed to upload file", false),
+        ("PageId is required", false),
+        ("Invalid attachment id", false),
+        ("Error processing file upload.", true),
+        ("File too large. Exceeds the 50MB limit", true),
+        ("Bad Request", true),
+    ] {
+        *state.force_message.lock().unwrap() = message.to_string();
+        state.force_status.store(400, Ordering::SeqCst);
+        let error = client
+            .upload_attachment(PAGE_UUID, "diagram.png", "image/png", PNG_ISH)
+            .await
+            .expect_err("a 400 must surface as an error");
+        assert_eq!(
+            docmost_mcp::docmost_client::is_outcome_unknown(&error),
+            unknown,
+            "{message:?}: {error}"
+        );
+    }
+    // Other 4xx replies come from checks that run before the file is read.
+    for status in [403, 404] {
+        *state.force_message.lock().unwrap() = "Page not found".to_string();
+        state.force_status.store(status, Ordering::SeqCst);
+        let error = client
+            .upload_attachment(PAGE_UUID, "diagram.png", "image/png", PNG_ISH)
+            .await
+            .expect_err("a 4xx must surface as an error");
+        assert!(
+            !docmost_mcp::docmost_client::is_outcome_unknown(&error),
+            "{status}: {error}"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn upload_attachment_marks_a_gateway_error_as_uncertain() -> Result<()> {
     let temp = TempDir::new()?;
@@ -1033,6 +1083,12 @@ async fn staged_upload_refuses_when_busy_without_using_the_url_up() -> Result<()
 
     let (status, body) = put_to(&app, &waiting_url, PNG_ISH.to_vec()).await?;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["uploaded"], json!(false), "nothing was stored");
+    assert_eq!(
+        body["retrySameUrl"],
+        json!(true),
+        "the busy reply is the only one where the same URL can be retried"
+    );
 
     // Once the stalled upload times out and frees its slot, the same URL still works.
     assert_eq!(holder.await?, StatusCode::REQUEST_TIMEOUT);
@@ -1160,5 +1216,64 @@ async fn staged_upload_reports_an_unreadable_success_as_uncertain() -> Result<()
         audit.contains("\"uncertain\""),
         "the outcome must be audited as uncertain"
     );
+    Ok(())
+}
+
+/// The three outcome classes and the retry field, as the PUT's caller sees them.
+#[tokio::test]
+async fn staged_upload_reports_outcome_and_retry_for_each_class() -> Result<()> {
+    use_test_audit_log();
+    let temp = TempDir::new()?;
+    let (client, state, _) = spawn(&temp).await?;
+    let stager = UploadStager::new(MCP_PUBLIC_URL, 1024);
+    let app = staged_upload_routes(stager.clone());
+    let begin = || {
+        stager.begin(
+            client.clone(),
+            PAGE_UUID,
+            "diagram.png",
+            "image/png",
+            PNG_ISH.len(),
+            sha256_of(PNG_ISH),
+        )
+    };
+
+    // Stored: true, nothing to retry.
+    let url = begin().await?.url;
+    let (status, body) = put_to(&app, &url, PNG_ISH.to_vec()).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["uploaded"], json!(true));
+    assert_eq!(body["retrySameUrl"], json!(false));
+
+    // Known rejection before storage: false, but the URL is used up.
+    let url = begin().await?.url;
+    *state.force_message.lock().unwrap() = "PageId is required".to_string();
+    state.force_status.store(400, Ordering::SeqCst);
+    let (status, body) = put_to(&app, &url, PNG_ISH.to_vec()).await?;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["uploaded"], json!(false), "{body}");
+    assert_eq!(body["retrySameUrl"], json!(false), "{body}");
+    let (status, _) = put_to(&app, &url, PNG_ISH.to_vec()).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the URL is used up");
+
+    // A generic 400 that may follow storage: unknown, and not retryable.
+    let url = begin().await?.url;
+    *state.force_message.lock().unwrap() = "Error processing file upload.".to_string();
+    state.force_status.store(400, Ordering::SeqCst);
+    let (status, body) = put_to(&app, &url, PNG_ISH.to_vec()).await?;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["uploaded"], Value::Null, "{body}");
+    assert_eq!(body["retrySameUrl"], json!(false), "{body}");
+    assert!(
+        body["hint"].as_str().unwrap().contains("attachments"),
+        "{body}"
+    );
+
+    // Refused by this server (wrong size): false, URL used up.
+    let url = begin().await?.url;
+    let (status, body) = put_to(&app, &url, b"short".to_vec()).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["uploaded"], json!(false));
+    assert_eq!(body["retrySameUrl"], json!(false));
     Ok(())
 }

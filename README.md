@@ -142,6 +142,12 @@ the raw file with an ordinary HTTP `PUT` (`curl -T file <url>`). The response gi
 the attachment's `/api/files/{id}/{name}` path, which page Markdown can embed
 (`![alt](path)`) or link.
 
+A failed `PUT` answers JSON with `uploaded` (`true`, `false` for a known rejection
+before storage, or `null` when Docmost may have stored the file) and `retrySameUrl`
+(`true` only when the server was busy and the same URL can be sent again). After
+`null`, check the page's attachments before uploading again. See
+[docs/write-tools.md](docs/write-tools.md).
+
 ### Pagination
 
 List tools accept `limit` and `cursor`, and their output states how many results

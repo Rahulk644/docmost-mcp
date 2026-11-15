@@ -37,7 +37,13 @@ impl DocmostMcpServer {
                        docmost_update_page (`![alt](/api/files/...)` embeds an image, \
                        `[name](/api/files/...)` links any file), keeping it relative so it \
                        resolves on the Docmost origin for signed-in readers. The URL expires \
-                       after 10 minutes.",
+                       after 10 minutes. A failed PUT answers JSON with two fields. \
+                       `uploaded`: false (Docmost rejected it before storing anything) or \
+                       null (unknown: Docmost may have stored the file, so check the \
+                       page's attachments before uploading again). `retrySameUrl`: true \
+                       only for a 503 busy-server reply, where nothing was stored and the \
+                       same URL can be PUT again shortly; otherwise the URL is used up and \
+                       a retry needs a new docmost_begin_upload.",
         annotations(
             title = "Begin Docmost Upload",
             read_only_hint = false,
@@ -106,11 +112,13 @@ impl DocmostMcpServer {
              curl -sS --fail-with-body -T <file> '{url}'\n\n\
              Nothing is uploaded unless the body is exactly {size} bytes with SHA-256 {hash}. \
              The PUT response is JSON with the attachment ID, its `path` and a ready-made \
-             `markdown` snippet for docmost_update_page. On failure, read the JSON: \
-             `\"uploaded\": false` means nothing was stored and the URL is used up, so call \
-             docmost_begin_upload again; `\"uploaded\": null` means Docmost may have stored \
-             the file, so check the page's attachments before uploading again. If the PUT \
-             gets no response at all, check the page's attachments before starting again.",
+             `markdown` snippet for docmost_update_page. On failure, read the JSON. \
+             `\"uploaded\": false` means Docmost stored nothing; `\"uploaded\": null` means it \
+             may have, so check the page's attachments before uploading again. \
+             `\"retrySameUrl\": true` (a 503, the server was busy) means the same URL can be \
+             PUT again; otherwise the URL is used up, and a retry after `false` needs \
+             docmost_begin_upload again. If the PUT gets no response at all, check the \
+             page's attachments before starting again.",
             name = input.file_name,
             minutes = begun.expires_in.as_secs().div_ceil(60),
             url = begun.url,

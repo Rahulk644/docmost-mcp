@@ -54,9 +54,10 @@ generate every byte as output. It needs the HTTP transport with
    `begin_upload`. It returns a single-use URL, `{DOCMOST_MCP_PUBLIC_URL}/uploads/{token}`.
 2. The client sends the raw file there with one `PUT`, for example
    `curl -sS --fail-with-body -T chart.png '<url>'`. Keep the error body (don't use
-   plain `-f`): on failure its `uploaded` field says whether anything may have been
-   stored. If the `PUT` gets no response at all, check the page's attachments before
-   starting again.
+   plain `-f`): on failure its `uploaded` and `retrySameUrl` fields say whether
+   anything may have been stored and whether the same URL can be sent again (see
+   "Outcome and retry" below). If the `PUT` gets no response at all, check the page's
+   attachments before starting again.
 3. The server checks the body is exactly `size` bytes with the declared SHA-256. Only
    then does it upload to Docmost as the session that began the upload (pinned when the
    upload is approved, so it can't switch accounts in between), auditing it as
@@ -68,7 +69,7 @@ bits, stored only as a hash, bound to one page, file name, MIME type, size and S
 usable once, and valid for 10 minutes. Any request uses it up, including one whose body
 is refused, so a failed attempt needs a new `docmost_begin_upload`. Two cases don't use
 it up: when too many uploads are already in progress (four at once), the server answers
-`503` and the URL can be retried. Each upload has 15 minutes from its first byte to
+`503` with `"retrySameUrl": true`. Each upload has 15 minutes from its first byte to
 Docmost's reply. If the body hasn't arrived by then, it is refused with `408` and
 nothing was uploaded. If Docmost was already receiving it, the answer is `504` with
 `"uploaded": null` and the audit log records `timed_out`: Docmost may have stored the
@@ -77,7 +78,26 @@ once the file may have been sent, such as a broken connection, a `5xx` from Docm
 from a proxy in front of it, or a success reply that can't be read: the answer is `502`
 with `"uploaded": null`, and the audit log records `uncertain`. Only a failure before
 sending or a `4xx` from Docmost (a refusal, such as missing edit access) proves nothing
-was stored; those answer `502` with `"uploaded": false`. `DOCMOST_MCP_PUBLIC_URL` must be an `https://` origin outside
+was stored; those answer `502` with `"uploaded": false`. The exception is a generic
+`400`: Docmost's upload handler also answers `400 Error processing file upload.` (and
+`File too large` when the limit trips mid-stream) after the storage layer has run, so
+only a `400` whose message is `Failed to upload file`, `PageId is required` or `Invalid
+attachment id` counts as a known rejection. Any other `400` is `"uploaded": null`.
+
+**Outcome and retry.** A failed `PUT` answers JSON with two independent fields:
+
+| `uploaded` | Meaning |
+|---|---|
+| `true` | Stored. The reply carries the attachment ID, `path` and `markdown`. |
+| `false` | Known rejected before storage (a bad body, a `4xx` refusal, a spent URL). |
+| `null` | Unknown: Docmost may have stored the file. Check the page's attachments before uploading again. |
+
+| `retrySameUrl` | Meaning |
+|---|---|
+| `true` | Only the busy-server `503`: nothing was stored and the URL is unused, so send the same `PUT` again shortly. |
+| `false` | Every other reply: the URL is used up. After `uploaded: false`, call `docmost_begin_upload` again; after `null`, check first. |
+
+`DOCMOST_MCP_PUBLIC_URL` must be an `https://` origin outside
 localhost; otherwise staged uploads are turned off with a warning. The body streams to
 this server rather than through the JSON-RPC transport, so the limit is
 `DOCMOST_MCP_MAX_UPLOAD_BYTES` (50 MiB by default) rather than 2 MiB. Docmost's own

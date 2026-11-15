@@ -8,9 +8,18 @@ use crate::{auth::manager::safe_read_response_text, debug::debug_log, types::Doc
 /// Once the request may have left this server, every error is unknown unless it proves
 /// nothing was stored. Only two things prove that: the request never left (a connect or
 /// request-building failure, or an error before sending) or the reply is a `4xx`, a
-/// refusal of the request itself. Anything else, such as a connection reset, a `5xx`
+/// refusal of the request itself, other than the generic `400` described below.
+/// Anything else, such as a connection reset, a `5xx`
 /// from Docmost or from a proxy in front of it, or a success reply that can't be read,
 /// may come after the file was stored.
+///
+/// A `400` needs a closer look. Docmost 0.96's upload handler
+/// (`attachment.controller.ts`) answers `400` both before storage (`Failed to upload
+/// file`, `PageId is required`, `Invalid attachment id`) and after the storage layer has
+/// run (`Error processing file upload.`, and `File too large` when the size limit trips
+/// mid-stream), so a `400` only proves nothing was stored when its message is one of the
+/// first group. Any other `400` is unknown. `404` (page not found) and `403` (no edit
+/// access) come from checks that run before the file is read.
 #[derive(Debug)]
 pub struct UploadOutcomeUnknown(pub anyhow::Error);
 
@@ -99,9 +108,10 @@ impl super::DocmostClient {
                     .trim()
                     .to_string()
             );
-            // A 4xx refuses the request, so nothing was stored. Anything else (a 5xx from
-            // Docmost or from a proxy in front of it) may come after the file was stored.
-            return Err(if status.is_client_error() {
+            // A 4xx refuses the request, so nothing was stored, except a generic 400 that
+            // doesn't match a known pre-storage message. Anything else (a 5xx from Docmost
+            // or from a proxy in front of it) may come after the file was stored.
+            return Err(if is_known_rejection(status, &details) {
                 error
             } else {
                 outcome_unknown(error)
@@ -125,6 +135,25 @@ impl super::DocmostClient {
             .context("Docmost upload response was not an attachment")
             .map_err(outcome_unknown)
     }
+}
+
+/// Messages Docmost 0.96 uses for a `400` raised before anything reaches storage.
+const PRE_STORAGE_400_MESSAGES: [&str; 3] = [
+    "Failed to upload file",
+    "PageId is required",
+    "Invalid attachment id",
+];
+
+/// True when an error reply proves Docmost stored nothing: a `4xx` other than `400`, or a
+/// `400` carrying one of [`PRE_STORAGE_400_MESSAGES`]. Any other `400` is ambiguous.
+fn is_known_rejection(status: reqwest::StatusCode, details: &str) -> bool {
+    if !status.is_client_error() {
+        return false;
+    }
+    status != reqwest::StatusCode::BAD_REQUEST
+        || PRE_STORAGE_400_MESSAGES
+            .iter()
+            .any(|message| details.contains(message))
 }
 
 /// True for the canonical 8-4-4-4-12 hex UUID form (any version).

@@ -217,15 +217,36 @@ fn reply(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-fn rejected(status: StatusCode, message: String) -> Response {
+/// Every failure body says two separate things. `uploaded` is `false` only when nothing
+/// was stored, and `null` when Docmost may have stored the file. `retrySameUrl` is `true`
+/// only when the same URL can be sent again (the server was busy and never used it up);
+/// otherwise the URL is spent. Neither implies the other: an uncertain failure is not
+/// retryable, and a known rejection still needs a new `docmost_begin_upload`.
+fn failure(status: StatusCode, message: String, uploaded: Value, retry_same_url: bool) -> Response {
+    let hint = match (&uploaded, retry_same_url) {
+        (_, true) => {
+            "Nothing was stored and this URL is still valid: send the same PUT again shortly."
+        }
+        (Value::Null, false) => {
+            "This URL is used up, and Docmost may have stored the file. Check the page's attachments; call docmost_begin_upload again only if it is not there."
+        }
+        _ => {
+            "Nothing was stored, but this URL has been used up. Call docmost_begin_upload again to get a new one."
+        }
+    };
     reply(
         status,
         json!({
             "error": message,
-            "uploaded": false,
-            "hint": "This upload URL has been used up. Call docmost_begin_upload again to get a new one.",
+            "uploaded": uploaded,
+            "retrySameUrl": retry_same_url,
+            "hint": hint,
         }),
     )
+}
+
+fn rejected(status: StatusCode, message: String) -> Response {
+    failure(status, message, json!(false), false)
 }
 
 async fn receive_upload(
@@ -237,21 +258,17 @@ async fn receive_upload(
     // up, so the client can simply retry. The slot is held until the upload finishes or
     // its deadline passes.
     let Ok(_slot) = stager.in_flight.clone().try_acquire_owned() else {
-        return reply(
+        return failure(
             StatusCode::SERVICE_UNAVAILABLE,
-            json!({
-                "error": "Too many uploads are in progress. The URL is still valid: retry shortly.",
-                "uploaded": false,
-            }),
+            "Too many uploads are in progress. The URL is still valid: retry shortly.".to_string(),
+            json!(false),
+            true,
         );
     };
     let Some(upload) = stager.take(&token).await else {
-        return reply(
+        return rejected(
             StatusCode::NOT_FOUND,
-            json!({
-                "error": "Unknown, already used or expired upload URL. Call docmost_begin_upload to get a new one.",
-                "uploaded": false,
-            }),
+            "Unknown, already used or expired upload URL. Call docmost_begin_upload to get a new one.".to_string(),
         );
     };
 
@@ -272,16 +289,15 @@ async fn receive_upload(
             {
                 tracing::error!(target = %page_id, %error, "Failed to append upload timeout to audit log");
             }
-            reply(
+            failure(
                 StatusCode::GATEWAY_TIMEOUT,
-                json!({
-                    "error": format!(
-                        "Docmost didn't finish the upload within {} seconds. It may already have \
-                         stored the file: check the page's attachments before uploading again.",
-                        stager.deadline.as_secs()
-                    ),
-                    "uploaded": Value::Null,
-                }),
+                format!(
+                    "Docmost didn't finish the upload within {} seconds. It may already have \
+                     stored the file: check the page's attachments before uploading again.",
+                    stager.deadline.as_secs()
+                ),
+                Value::Null,
+                false,
             )
         }
         Err(_) => rejected(
@@ -337,9 +353,9 @@ async fn process_upload(upload: Pending, body: Body, forwarding: Arc<AtomicBool>
     if let Err(error) =
         crate::audit::record_mutation("upload_attachment", &upload.page_id, "authorized").await
     {
-        return reply(
+        return rejected(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "error": format!("Could not write the audit log, so nothing was uploaded: {error}"), "uploaded": false }),
+            format!("Could not write the audit log, so nothing was uploaded: {error}"),
         );
     }
     forwarding.store(true, Ordering::SeqCst);
@@ -381,6 +397,7 @@ async fn process_upload(upload: Pending, body: Body, forwarding: Arc<AtomicBool>
                 StatusCode::OK,
                 json!({
                     "uploaded": true,
+                    "retrySameUrl": false,
                     "attachmentId": attachment.id,
                     "fileName": name,
                     "size": attachment.file_size.unwrap_or(upload.size as u64),
@@ -393,13 +410,15 @@ async fn process_upload(upload: Pending, body: Body, forwarding: Arc<AtomicBool>
             )
         }
         // The message already says to check the page before retrying.
-        Err(error) if uncertain => reply(
+        Err(error) if uncertain => failure(
             StatusCode::BAD_GATEWAY,
-            json!({ "error": format!("The upload's outcome is unknown: {error}"), "uploaded": Value::Null }),
+            format!("The upload's outcome is unknown: {error}"),
+            Value::Null,
+            false,
         ),
-        Err(error) => reply(
+        Err(error) => rejected(
             StatusCode::BAD_GATEWAY,
-            json!({ "error": format!("Docmost rejected the upload: {error}"), "uploaded": false }),
+            format!("Docmost rejected the upload: {error}"),
         ),
     }
 }
