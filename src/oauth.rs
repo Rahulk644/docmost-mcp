@@ -292,6 +292,66 @@ impl OAuthState {
         );
         active
     }
+
+    /// Invalidate every grant that carries the Docmost session with this
+    /// fingerprint: access tokens, refresh tokens, and unredeemed codes.
+    ///
+    /// Called once Docmost rejects the session (logout, revocation, expiry).
+    /// The client then gets a 401 from `/mcp`, its refresh is refused, and it
+    /// falls back to a fresh authorization, which captures a new session.
+    pub async fn revoke_session(&self, fingerprint: &str) {
+        let carries = |session: &AuthenticatedSession| {
+            constant_time_equal(&Self::session_fingerprint(session), fingerprint)
+        };
+        self.inner
+            .access_tokens
+            .write()
+            .await
+            .retain(|_, grant| !carries(&grant.session));
+        self.inner
+            .refresh_tokens
+            .write()
+            .await
+            .retain(|_, grant| !carries(&grant.session));
+        self.inner
+            .codes
+            .write()
+            .await
+            .retain(|_, grant| !carries(&grant.session));
+    }
+}
+
+#[cfg(test)]
+impl OAuthState {
+    /// Issue an access and refresh token for `session` without the browser flow.
+    pub(crate) async fn issue_tokens_for_test(
+        &self,
+        client_id: &str,
+        session: AuthenticatedSession,
+    ) -> (String, String) {
+        let response = issue_tokens(
+            self,
+            client_id.to_string(),
+            DEFAULT_SCOPE.to_string(),
+            session,
+            true,
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("token response body");
+        let tokens: serde_json::Value = serde_json::from_slice(&body).expect("token JSON");
+        (
+            tokens["access_token"]
+                .as_str()
+                .expect("access token")
+                .into(),
+            tokens["refresh_token"]
+                .as_str()
+                .expect("refresh token")
+                .into(),
+        )
+    }
 }
 
 async fn protected_resource_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
@@ -757,8 +817,40 @@ async fn exchange_refresh_token(state: &OAuthState, form: TokenForm) -> Response
             "Docmost session expired; sign in again.",
         );
     }
+    // A refresh is the one point a client asks for new credentials without
+    // touching Docmost, so check the session here rather than minting fresh
+    // tokens for one Docmost has already revoked.
+    if docmost_rejects_session(&grant.session).await {
+        state
+            .revoke_session(&OAuthState::session_fingerprint(&grant.session))
+            .await;
+        return oauth_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "Docmost rejected this account session; sign in again.",
+        );
+    }
 
     issue_tokens(state, grant.client_id, grant.scope, grant.session, true).await
+}
+
+/// True only when Docmost explicitly answers 401 for this session. A network
+/// failure is not proof of revocation; the next tool call would surface a real
+/// rejection anyway.
+async fn docmost_rejects_session(session: &AuthenticatedSession) -> bool {
+    let Ok(http) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    else {
+        return false;
+    };
+    http.post(format!("{}/api/users/me", session.base_url))
+        .bearer_auth(&session.token)
+        .json(&json!({}))
+        .send()
+        .await
+        .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
 }
 
 async fn issue_tokens(
@@ -788,7 +880,7 @@ async fn issue_tokens(
     let access_expiry = docmost_expiry
         .map(|expiry| expiry.min(now + Duration::minutes(ACCESS_TOKEN_TTL_MINUTES)))
         .unwrap_or(now + Duration::minutes(ACCESS_TOKEN_TTL_MINUTES));
-    if access_expiry <= now + Duration::seconds(30) {
+    if crate::auth::manager::session_expires_within_cutoff(session.expires_at.as_deref()) {
         return oauth_json_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
@@ -965,10 +1057,16 @@ async fn native_session(state: &OAuthState, headers: &HeaderMap) -> Option<Authe
         .or_else(|| body.pointer("/user/email"))?
         .as_str()?
         .to_string();
+    let expires_at = crate::auth::manager::get_jwt_expiry_iso(&token);
+    // Same cutoff as token issuance and tool calls: don't authorize a session
+    // that would be treated as expired the moment it is used.
+    if crate::auth::manager::session_expires_within_cutoff(expires_at.as_deref()) {
+        return None;
+    }
     Some(AuthenticatedSession {
         base_url: state.inner.docmost_base_url.clone(),
         email,
-        expires_at: crate::auth::manager::get_jwt_expiry_iso(&token),
+        expires_at,
         token,
     })
 }
@@ -1366,6 +1464,58 @@ mod tests {
         }
         assert_eq!(documents[0], documents[1]);
         assert_eq!(documents[0]["resource"], "https://mcp.example.com/mcp");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_near_expiry_is_refused_at_issuance_and_by_the_tool_call_path()
+    -> anyhow::Result<()> {
+        use crate::auth::manager::AuthManager;
+
+        let state = OAuthState::new(OAuthConfig {
+            public_url: "https://mcp.example.com".into(),
+            docmost_base_url: "http://docmost:3000".into(),
+            brand: DEFAULT_BRAND.into(),
+            browser_url: None,
+        })?;
+        let session_with = |remaining: Duration| AuthenticatedSession {
+            base_url: "http://docmost:3000".into(),
+            email: "a@example.com".into(),
+            token: "tok".into(),
+            expires_at: Some((Utc::now() + remaining).to_rfc3339()),
+        };
+
+        // About one minute left: inside the shared cutoff. Issuance must refuse
+        // it, because the first tool call would revoke it straight away.
+        let near = session_with(Duration::minutes(1));
+        let response =
+            issue_tokens(&state, "c".into(), DEFAULT_SCOPE.into(), near.clone(), true).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.inner.access_tokens.read().await.is_empty());
+        assert!(
+            AuthManager::from_session(near)?
+                .get_authenticated_session()
+                .await
+                .is_err()
+        );
+
+        // Comfortably outside the cutoff: both paths accept it.
+        let healthy = session_with(Duration::minutes(10));
+        let response = issue_tokens(
+            &state,
+            "c".into(),
+            DEFAULT_SCOPE.into(),
+            healthy.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            AuthManager::from_session(healthy)?
+                .get_authenticated_session()
+                .await
+                .is_ok()
+        );
         Ok(())
     }
 
