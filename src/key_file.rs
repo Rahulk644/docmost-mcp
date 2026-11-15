@@ -30,6 +30,7 @@ pub fn random_key() -> [u8; KEY_BYTES] {
 /// being silently replaced.
 pub fn load_or_create_key(path: &Path) -> Result<[u8; KEY_BYTES]> {
     if let Some(key) = read_key(path)? {
+        sweep_stale_temp_files(path);
         return Ok(key);
     }
     if let Some(dir) = parent_dir(path) {
@@ -41,7 +42,72 @@ pub fn load_or_create_key(path: &Path) -> Result<[u8; KEY_BYTES]> {
             .create(dir)
             .with_context(|| format!("Failed to create {}", dir.display()))?;
     }
-    publish_key(path, &random_key())
+    let key = publish_key(path, &random_key())?;
+    sweep_stale_temp_files(path);
+    Ok(key)
+}
+
+/// A temporary key file this old is from a start that crashed: no live
+/// start takes anywhere near this long between creating and linking one.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Removes temporary files that crashed starts left beside `path`
+/// (`.<name>.<hex>.tmp`): a second link to the live key (a crash between
+/// linking and removing the temporary name), or an unpublished key older
+/// than STALE_TEMP_AGE. A younger unlinked one may belong to a process that
+/// is starting right now, so it is left alone. Best effort: failures are
+/// ignored, since the key itself is already loaded.
+fn sweep_stale_temp_files(path: &Path) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!(".{name}.");
+    let dir = parent_dir(path).unwrap_or(Path::new("."));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let live = fs::metadata(path).ok();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(middle) = file_name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        if middle.is_empty() || !middle.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let temp = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&temp) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if stale || live.as_ref().is_some_and(|live| same_file(live, &metadata)) {
+            let _ = fs::remove_file(&temp);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    false
 }
 
 /// Publishes `key` at `path` unless a key is already there, and returns the
@@ -207,6 +273,42 @@ mod tests {
                 "round {round}: temporary files left behind"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn startup_sweeps_temporary_files_left_by_crashed_starts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.key");
+        let key = load_or_create_key(&path)?;
+
+        // Crashed after linking: a second name for the live key.
+        let linked = dir.path().join(".test.key.0123abcd.tmp");
+        fs::hard_link(&path, &linked)?;
+        // Crashed before linking, long ago.
+        let abandoned = dir.path().join(".test.key.4567ef.tmp");
+        fs::write(&abandoned, [9_u8; KEY_BYTES])?;
+        fs::File::options()
+            .write(true)
+            .open(&abandoned)?
+            .set_modified(std::time::SystemTime::now() - 2 * STALE_TEMP_AGE)?;
+        // Another process starting right now: not ours to remove.
+        let in_flight = dir.path().join(".test.key.89ab.tmp");
+        fs::write(&in_flight, [8_u8; KEY_BYTES])?;
+        // Not a temporary key file at all.
+        let unrelated = dir.path().join(".test.key.notes.tmp");
+        fs::write(&unrelated, b"keep")?;
+
+        assert_eq!(load_or_create_key(&path)?, key);
+        let mut expected = vec![
+            ".test.key.89ab.tmp".to_string(),
+            ".test.key.notes.tmp".to_string(),
+            "test.key".to_string(),
+        ];
+        #[cfg(not(unix))]
+        expected.insert(0, ".test.key.0123abcd.tmp".to_string());
+        expected.sort();
+        assert_eq!(entries(dir.path())?, expected);
         Ok(())
     }
 
