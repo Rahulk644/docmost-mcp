@@ -98,6 +98,8 @@ impl<T> Page<T> {
     }
 }
 
+mod attachments;
+pub use attachments::{UploadOutcomeUnknown, is_outcome_unknown};
 mod writes;
 
 impl DocmostClient {
@@ -107,6 +109,19 @@ impl DocmostClient {
             http: Client::new(),
             version: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// A copy of this client fixed to the session it would use right now. The copy can
+    /// neither switch accounts nor reauthenticate, so work approved now can't later run
+    /// as a different account, for example when a server on saved credentials signs in
+    /// again as someone else before a staged upload arrives.
+    pub async fn pinned(&self) -> Result<Self> {
+        let session = self.auth_manager.get_authenticated_session().await?;
+        Ok(Self {
+            auth_manager: AuthManager::from_session(session)?,
+            http: self.http.clone(),
+            version: self.version.clone(),
+        })
     }
 
     /// The detected Docmost server version (from `POST /api/version`). Fetched once and
@@ -326,6 +341,46 @@ impl DocmostClient {
                     "Received 401 from Docmost API; retrying after reauthentication",
                     Some(&serde_json::json!({ "endpoint": endpoint })),
                 );
+                session = self.auth_manager.reauthenticate().await?;
+                retry_on_unauthorized = false;
+                continue;
+            }
+
+            return Ok(response);
+        }
+    }
+
+    /// POST a multipart form with bearer auth and a single 401-retry, returning the raw
+    /// response. A multipart `Form` cannot be cloned, so `build_form` is called again for
+    /// each attempt.
+    async fn send_multipart<F>(&self, endpoint: &str, build_form: F) -> Result<Response>
+    where
+        F: Fn() -> Result<reqwest::multipart::Form>,
+    {
+        let mut session = self.auth_manager.get_authenticated_session().await?;
+        let mut retry_on_unauthorized = true;
+
+        loop {
+            debug_log(
+                "api",
+                "Calling Docmost API (multipart)",
+                Some(&serde_json::json!({
+                    "endpoint": endpoint,
+                    "baseUrl": session.base_url,
+                    "retryOnUnauthorized": retry_on_unauthorized
+                })),
+            );
+
+            let response = self
+                .http
+                .post(format!("{}{}", session.base_url, endpoint))
+                .bearer_auth(&session.token)
+                .multipart(build_form()?)
+                .send()
+                .await
+                .with_context(|| format!("Failed to call {endpoint}"))?;
+
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && retry_on_unauthorized {
                 session = self.auth_manager.reauthenticate().await?;
                 retry_on_unauthorized = false;
                 continue;
