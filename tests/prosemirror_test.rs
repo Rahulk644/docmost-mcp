@@ -1,4 +1,6 @@
-use docmost_mcp::prosemirror::{markdown_to_prosemirror, prosemirror_to_markdown};
+use docmost_mcp::prosemirror::{
+    WriteContext, markdown_to_prosemirror, markdown_to_prosemirror_in, prosemirror_to_markdown,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -970,7 +972,7 @@ fn renders_list_item_that_starts_with_an_embed() {
 #[test]
 fn markdown_to_prosemirror_bare_provider_link_is_an_embed() {
     for source in [format!("[{YOUTUBE}]({YOUTUBE})"), format!("<{YOUTUBE}>")] {
-        let doc = markdown_to_prosemirror(&source);
+        let doc = markdown_to_prosemirror_in(&source, WriteContext::Page);
         let children = doc_children(&doc);
         assert_eq!(children.len(), 1, "{source}: {doc}");
         assert_eq!(children[0], {
@@ -987,7 +989,7 @@ fn markdown_to_prosemirror_named_or_unknown_links_stay_links() {
         format!("[the talk]({YOUTUBE})"),
         "<https://example.com/watch?v=x>".to_string(),
     ] {
-        let doc = markdown_to_prosemirror(&source);
+        let doc = markdown_to_prosemirror_in(&source, WriteContext::Page);
         assert!(find_node(&doc, "embed").is_none(), "{source}: {doc}");
         assert_eq!(node_type(&doc_children(&doc)[0]), Some("paragraph"));
     }
@@ -995,7 +997,8 @@ fn markdown_to_prosemirror_named_or_unknown_links_stay_links() {
 
 #[test]
 fn markdown_to_prosemirror_embed_splits_its_paragraph() {
-    let doc = markdown_to_prosemirror(&format!("before\n<{YOUTUBE}>\nafter"));
+    let doc =
+        markdown_to_prosemirror_in(&format!("before\n<{YOUTUBE}>\nafter"), WriteContext::Page);
     let types: Vec<_> = doc_children(&doc).iter().map(node_type).collect();
     assert_eq!(
         types,
@@ -1023,7 +1026,7 @@ fn embed_in_list_item_round_trips_through_markdown() {
             ]
         }]
     });
-    let back = markdown_to_prosemirror(&prosemirror_to_markdown(&original));
+    let back = markdown_to_prosemirror_in(&prosemirror_to_markdown(&original), WriteContext::Page);
 
     let list = &doc_children(&back)[0];
     assert_eq!(node_type(list), Some("bulletList"));
@@ -1078,5 +1081,30 @@ fn renders_media_diagram_math_and_callout_nodes() {
             markdown.contains(needle),
             "missing {needle:?} in:\n{markdown}"
         );
+    }
+}
+
+#[test]
+fn bare_video_link_is_an_embed_in_a_page_but_stays_a_link_in_a_comment() {
+    // Docmost's comment editor has no `embed` node, so a comment must keep the URL as a link.
+    let source = format!("Watch this:\n\n<{YOUTUBE}>\n\n[{YOUTUBE}]({YOUTUBE})");
+
+    let page = markdown_to_prosemirror_in(&source, WriteContext::Page);
+    assert!(find_node(&page, "embed").is_some(), "{page}");
+
+    for comment in [
+        markdown_to_prosemirror_in(&source, WriteContext::Comment),
+        markdown_to_prosemirror(&source),
+    ] {
+        assert!(find_node(&comment, "embed").is_none(), "{comment}");
+        let types: Vec<_> = doc_children(&comment).iter().map(node_type).collect();
+        assert_eq!(types, [Some("paragraph"); 3], "{comment}");
+        // The URL survives as a link mark on its own text.
+        for paragraph in &doc_children(&comment)[1..] {
+            let text = &paragraph["content"][0];
+            assert_eq!(text["text"], YOUTUBE, "{comment}");
+            assert_eq!(text["marks"][0]["type"], "link");
+            assert_eq!(text["marks"][0]["attrs"]["href"], YOUTUBE);
+        }
     }
 }

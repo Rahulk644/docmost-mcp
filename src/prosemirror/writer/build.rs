@@ -3,15 +3,16 @@
 use pulldown_cmark::{CodeBlockKind, Event, Tag, TagEnd};
 use serde_json::{Map, Value, json};
 
-use super::{DocBuilder, ImageState, Mention, PendingLink};
+use super::{DocBuilder, ImageState, Mention, PendingLink, WriteContext};
 use crate::prosemirror::embed::embed_provider;
 use crate::prosemirror::nodes::{
     Frame, heading_level, is_whitespace_text, mention_node, text_node,
 };
 
 impl DocBuilder {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(context: WriteContext) -> Self {
         Self {
+            context,
             stack: vec![Frame::new("doc")],
             marks: Vec::new(),
             in_table_head: false,
@@ -118,11 +119,16 @@ impl DocBuilder {
                 });
             }
             _ => {
+                // Only page bodies get embeds, so only they need to track the link.
                 self.pending_link = match self.stack.last() {
-                    Some(frame) if frame.node_type == "paragraph" => Some(PendingLink {
-                        href: url.to_string(),
-                        start: frame.content.len(),
-                    }),
+                    Some(frame)
+                        if frame.node_type == "paragraph" && self.context == WriteContext::Page =>
+                    {
+                        Some(PendingLink {
+                            href: url.to_string(),
+                            start: frame.content.len(),
+                        })
+                    }
                     _ => None,
                 };
                 self.marks

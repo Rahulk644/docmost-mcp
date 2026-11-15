@@ -35,7 +35,9 @@ All notable changes are documented here. The format loosely follows
   the providers Docmost embeds. Extra blocks in list items are kept, indented
   under the item. Draw.io and Excalidraw diagrams render as images; videos,
   audio, PDFs and file attachments as links; math as `$...$`/`$$...$$`; and
-  callouts as Docmost's `:::type` fences.
+  callouts as Docmost's `:::type` fences. Embed conversion applies to page writes
+  only: Docmost's comment editor has no `embed` node, so a bare video link in a
+  comment (`docmost_create_comment`, `docmost_update_comment`) stays a link.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**
   Every cursor-based list tool accepted a `cursor`, but responses were folded into
   a bare `Vec` that discarded the rest — so nothing ever told the caller what the

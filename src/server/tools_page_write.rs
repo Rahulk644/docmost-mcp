@@ -6,7 +6,7 @@
 use rmcp::{handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
 
 use crate::{
-    prosemirror::markdown_to_prosemirror,
+    prosemirror::{WriteContext, markdown_to_prosemirror_in},
     server::{
         DocmostMcpServer,
         render::{format_created_page, format_updated_page},
@@ -85,7 +85,7 @@ impl DocmostMcpServer {
             .markdown
             .as_deref()
             .filter(|markdown| !markdown.trim().is_empty())
-            .map(markdown_to_prosemirror);
+            .map(|markdown| markdown_to_prosemirror_in(markdown, WriteContext::Page));
         let has_body = content.is_some();
         let page = self
             .run_write(

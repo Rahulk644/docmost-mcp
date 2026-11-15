@@ -12,4 +12,4 @@ mod reader;
 mod writer;
 
 pub use reader::prosemirror_to_markdown;
-pub use writer::markdown_to_prosemirror;
+pub use writer::{WriteContext, markdown_to_prosemirror, markdown_to_prosemirror_in};
