@@ -41,18 +41,37 @@ that token to its own disk:
   a restart.
 - **The key** is 32 random bytes in `~/.docmost-local-mcp/refresh-token.key`
   (override with `DOCMOST_MCP_REFRESH_KEY_FILE`), created on first start with
-  mode 0600 in a 0700 directory. A file of the wrong length stops startup
-  rather than being replaced. **This file is the secret to protect**: anyone
+  mode 0600 in a 0700 directory. It is written in full under a temporary name,
+  synced, and hard-linked into place, which never replaces a key another
+  process already published: replicas starting together against an empty
+  volume all load the same complete key. A file of the wrong length stops
+  startup rather than being replaced. **This file is the secret to protect**: anyone
   who has it *and* a client's stored refresh token can read the Docmost
   session inside. Deleting it (and restarting) invalidates every outstanding
   refresh token; users then sign in again. Tokens are also bound to
   `DOCMOST_MCP_PUBLIC_URL` and `DOCMOST_BASE_URL`, so changing either has the
   same effect.
-- **Single use.** Every refresh rotates the token. Rotation state per
-  authorization (no credentials, just a counter) is kept in memory; presenting
-  a token that was already redeemed refuses it and revokes every token
-  descended from the same authorization, so a stolen copy and the legitimate
-  client cannot both keep going.
+- **Single use.** Every refresh rotates the token. Presenting a token that was
+  already redeemed refuses it and revokes every token descended from the same
+  authorization, so a stolen copy and the legitimate client cannot both keep
+  going. The old token is spent only when the replacement is issued: a
+  temporary failure (for example `temporarily_unavailable`) leaves it usable
+  for the client's retry. Of concurrent redemptions of one token, at most one
+  succeeds.
+- **Rotation state is durable.** Per authorization the server records only the
+  generation that may be redeemed next, whether it was revoked, and its expiry,
+  in `~/.docmost-local-mcp/refresh-token-families.jsonl` (override with
+  `DOCMOST_MCP_REFRESH_STATE_FILE`; mode 0600). No session, token or token hash
+  is written. Each change is appended and synced before the response that
+  depends on it, so spent tokens stay spent and revocations stay revoked across
+  restarts. Every read and write holds an exclusive lock on the file and first
+  applies other processes' changes, so processes sharing it (such as the old
+  and new process in a rolling restart) enforce single use together. The file
+  is compacted at startup and when it grows. A refresh token whose
+  authorization the file does not know is refused, so losing or deleting the
+  file signs everyone out rather than reopening spent tokens; an unreadable
+  line (other than a torn final one from a crash) makes refreshes fail until
+  it is fixed.
 - **Revalidation.** Before issuing anything, a refresh asks Docmost
   (`/api/users/me`) whether the session is still valid. If Docmost answers 401
   or 403 (signed out, revoked, expired) the refresh fails with
@@ -62,12 +81,12 @@ that token to its own disk:
 
 Residual risks, stated plainly:
 
-- Rotation state is lost on restart. After a restart, each authorization's
-  first refresh is accepted whichever of its unexpired tokens is presented,
-  including one already redeemed before the restart. A thief holding a copied
-  refresh token therefore gets one redemption per restart; when the
-  legitimate client then refreshes, the reuse is detected and both lose
-  access. A revocation triggered by reuse is likewise forgotten on restart.
+- Restoring an older copy of the rotation-state file (from a backup, say)
+  makes the generations spent since then redeemable once more. Do not restore
+  it; deleting it is the safe reset.
+- Processes sharing the state file rely on advisory file locks (`flock`). Keep
+  it on a filesystem where those work across the processes involved (local
+  disks do; some network filesystems do not).
 - An access token outlives a Docmost sign-out by up to an hour in this
   server's memory, though Docmost itself rejects the session on every call.
 - Refresh tokens are bearer credentials until the Docmost session expires (or
@@ -98,6 +117,8 @@ user before sending `confirm: true`.
   exchanges it with Docmost; the password is never stored. Access grants are
   memory-only; refresh tokens are sealed and held by the client (see above).
   Back up or mount `refresh-token.key` with the same care as other secrets.
+  `refresh-token-families.jsonl` holds no secrets but must be writable and
+  persistent alongside it.
 - OS-keychain persistence is preferred for interactive stdio mode. File fallback
   requires `DOCMOST_ALLOW_FILE_CREDENTIALS=true`.
 

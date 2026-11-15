@@ -77,6 +77,9 @@ Docmost session with Docmost first: signing out of Docmost also cuts off the
 MCP connection at its next refresh. The sealing key is created on first start
 in `~/.docmost-local-mcp/refresh-token.key`; keep that file on persistent
 storage, and protect it like a credential (see [SECURITY.md](SECURITY.md)).
+Rotation state (which refresh tokens are spent or revoked; no secrets) is kept
+in `~/.docmost-local-mcp/refresh-token-families.jsonl` on the same persistent,
+writable storage.
 
 Verify:
 
@@ -186,6 +189,7 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_MCP_ENABLE_WRITES` | `false` | Enables mutations; calls still require `confirm: true` |
 | `DOCMOST_MCP_AUDIT_LOG` | `~/.docmost-local-mcp/mutations.jsonl` | Mutation audit file |
 | `DOCMOST_MCP_REFRESH_KEY_FILE` | `~/.docmost-local-mcp/refresh-token.key` | Key that seals account-auth refresh tokens; created on first start |
+| `DOCMOST_MCP_REFRESH_STATE_FILE` | `~/.docmost-local-mcp/refresh-token-families.jsonl` | Refresh-token rotation and revocation state (no secrets); must be writable |
 | `DOCMOST_ALLOW_FILE_CREDENTIALS` | `false` | Opts into the encrypted-file credential fallback |
 
 > The on-disk state directory is still `~/.docmost-local-mcp/`, retained from before

@@ -33,7 +33,12 @@ All notable changes are documented here. The format loosely follows
   `~/.docmost-local-mcp/refresh-token.key` (0600; `DOCMOST_MCP_REFRESH_KEY_FILE`
   overrides the path); deleting it invalidates every refresh token. Refresh
   tokens stay single-use, and replaying a spent one now revokes the whole
-  rotation. Each refresh first checks the session with Docmost, so signing out
+  rotation. Which tokens are spent or revoked (no sessions or tokens) is
+  recorded in `~/.docmost-local-mcp/refresh-token-families.jsonl`
+  (`DOCMOST_MCP_REFRESH_STATE_FILE` overrides), so both survive restarts; a
+  token is spent only once its replacement is issued, so a temporary failure
+  does not burn it. The key is published atomically, so replicas starting
+  together agree on it. Each refresh first checks the session with Docmost, so signing out
   of Docmost also ends the MCP connection at its next refresh. Access tokens
   remain in memory; after a restart clients get a 401 and refresh.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**

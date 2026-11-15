@@ -113,7 +113,14 @@ impl HttpServerConfig {
                 docmost_base_url: env::var("DOCMOST_BASE_URL")
                     .context("DOCMOST_BASE_URL is required for account authentication")?,
                 browser_url: env::var("DOCMOST_MCP_BROWSER_URL").ok(),
-                refresh_token_key_path: Some(refresh_token_key_path()?),
+                refresh_token_key_path: Some(state_file_path(
+                    "DOCMOST_MCP_REFRESH_KEY_FILE",
+                    "refresh-token.key",
+                )?),
+                refresh_state_path: Some(state_file_path(
+                    "DOCMOST_MCP_REFRESH_STATE_FILE",
+                    "refresh-token-families.jsonl",
+                )?),
                 brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
             })
         } else {
@@ -135,10 +142,10 @@ impl HttpServerConfig {
     }
 }
 
-/// `DOCMOST_MCP_REFRESH_KEY_FILE`, else
-/// `~/.docmost-local-mcp/refresh-token.key` (next to the mutation audit log).
-fn refresh_token_key_path() -> Result<std::path::PathBuf> {
-    if let Some(path) = env::var("DOCMOST_MCP_REFRESH_KEY_FILE")
+/// The file named by the environment variable `variable`, else
+/// `~/.docmost-local-mcp/<default_name>` (next to the mutation audit log).
+fn state_file_path(variable: &str, default_name: &str) -> Result<std::path::PathBuf> {
+    if let Some(path) = env::var(variable)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -146,8 +153,9 @@ fn refresh_token_key_path() -> Result<std::path::PathBuf> {
         return Ok(path.into());
     }
     Ok(dirs::home_dir()
-        .context("Unable to determine home directory for the refresh-token key")?
-        .join(".docmost-local-mcp/refresh-token.key"))
+        .with_context(|| format!("Unable to determine home directory for {default_name}"))?
+        .join(".docmost-local-mcp")
+        .join(default_name))
 }
 
 fn comma_separated_env(name: &str) -> Option<Vec<String>> {
