@@ -84,9 +84,15 @@ Residual risks, stated plainly:
 - Restoring an older copy of the rotation-state file (from a backup, say)
   makes the generations spent since then redeemable once more. Do not restore
   it; deleting it is the safe reset.
-- Processes sharing the state file rely on advisory file locks (`flock`). Keep
-  it on a filesystem where those work across the processes involved (local
-  disks do; some network filesystems do not).
+- Sharing the state file across processes is supported on Unix only. It
+  relies on advisory file locks (`flock`) and on detecting a replaced file by
+  inode, so keep it on a filesystem where locks work across the processes
+  involved (local disks do; some network filesystems do not). Elsewhere, run
+  one process per state file; the file is then never compacted.
+- A client that loses the response after its refresh was committed (it
+  disconnects or times out) and retries with the old token presents a spent
+  token, which revokes its family as RFC 9700 reuse detection does; the user
+  signs in again.
 - An access token outlives a Docmost sign-out by up to an hour in this
   server's memory, though Docmost itself rejects the session on every call.
 - Refresh tokens are bearer credentials until the Docmost session expires (or

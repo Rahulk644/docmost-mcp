@@ -319,7 +319,11 @@ impl Journal {
         let _ = self.file.unlock();
     }
 
-    /// Whether the open file is still the one at `path`.
+    /// Whether the open file is still the one at `path`. Off Unix there is no
+    /// stable file id in std, so this is always true there; compaction (the
+    /// only thing this process does that replaces the file) is disabled to
+    /// match, and sharing the journal across processes is supported on Unix
+    /// only.
     fn is_current(&self) -> io::Result<bool> {
         #[cfg(unix)]
         {
@@ -335,7 +339,30 @@ impl Journal {
         Ok(true)
     }
 
+    /// Whether the file still holds what was applied: it is at least
+    /// `offset` long and a record ends there. A journal truncated or rewritten
+    /// in place (same inode) fails this, and must be replayed from the start
+    /// rather than trusting state read from the old contents.
+    fn ends_where_applied(&self) -> io::Result<bool> {
+        if self.offset == 0 {
+            return Ok(true);
+        }
+        if self.file.metadata()?.len() < self.offset {
+            return Ok(false);
+        }
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(self.offset - 1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        Ok(last[0] == b'\n')
+    }
+
     fn read_tail(&mut self, families: &mut Families) -> io::Result<()> {
+        if !self.ends_where_applied()? {
+            self.offset = 0;
+            self.records = 0;
+            families.clear();
+        }
         let mut file = &self.file;
         file.seek(SeekFrom::Start(self.offset))?;
         let mut tail = Vec::new();
@@ -396,8 +423,16 @@ impl Journal {
         }
     }
 
+    /// Off Unix, other processes could not tell the file was replaced (see
+    /// is_current), so the journal is never compacted there.
+    #[cfg(not(unix))]
+    fn compact(&mut self, _: &Families) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Replaces the journal with one record per live family. Called with the
     /// lock held; on success the lock is held on the new file instead.
+    #[cfg(unix)]
     fn compact(&mut self, families: &Families) -> io::Result<()> {
         let mut contents = Vec::new();
         for (family, state) in families {
@@ -510,6 +545,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // Compaction is disabled elsewhere (see Journal::compact).
     #[test]
     fn compaction_keeps_live_state_and_drops_expired_families() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -555,6 +591,32 @@ mod tests {
         // The new process cannot redeem the generation the old one spent.
         assert_eq!(new.rotate("a", 1, later())?, Outcome::Reused);
         assert_eq!(old.check("a", 2)?, Outcome::Revoked);
+        Ok(())
+    }
+
+    /// A journal truncated in place (same inode, so not detected as replaced)
+    /// must not leave another process trusting what it read before: that
+    /// would let it accept a generation the truncated history had spent.
+    #[test]
+    fn a_journal_truncated_in_place_is_replayed_not_trusted() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("families.jsonl");
+        let mut first = FamilyStore::open(&path, 16)?;
+        let mut second = FamilyStore::open(&path, 16)?;
+        first.start("a", later())?;
+        assert_eq!(first.rotate("a", 1, later())?, Outcome::Accepted);
+        assert_eq!(second.check("a", 2)?, Outcome::Accepted);
+
+        // `: > families.jsonl`, then a record for another family that ends
+        // short of where `second` had read to.
+        fs::OpenOptions::new().write(true).open(&path)?.set_len(0)?;
+        first.start("b", later())?;
+        assert!(fs::metadata(&path)?.len() > 0);
+
+        // `second` replays the truncated journal: "a" is gone (refused, fail
+        // closed), not still at generation 2 from before the truncation.
+        assert_eq!(second.rotate("a", 2, later())?, Outcome::Unknown);
+        assert_eq!(second.check("b", 1)?, Outcome::Accepted);
         Ok(())
     }
 
