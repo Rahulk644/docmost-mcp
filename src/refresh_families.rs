@@ -53,9 +53,11 @@ pub struct FamilyState {
 pub enum Outcome {
     /// The token is current (check), or the change is now durable.
     Accepted,
-    /// No such family: never issued here, expired, or its state was lost.
+    /// No such family: never issued here, expired, revoked (and dropped), or its
+    /// state was lost.
     Unknown,
-    /// The family was revoked earlier.
+    /// The family is revoked but not yet dropped; the next operation drops it
+    /// and reports `Unknown`. Both are refused alike.
     Revoked,
     /// The token's generation was already redeemed; the family is now
     /// revoked (durably).
@@ -129,7 +131,7 @@ impl FamilyStore {
             .lock(&mut families)
             .with_context(|| format!("Failed to load {}", path.display()))?;
         let now = Utc::now();
-        families.retain(|_, state| state.expires_at > now);
+        families.retain(|_, state| keep(state, now));
         let compacted = journal.compact(&families);
         journal.unlock();
         compacted.with_context(|| format!("Failed to compact {}", path.display()))?;
@@ -239,7 +241,7 @@ impl FamilyStore {
         }
         let result = (|| {
             let now = Utc::now();
-            families.retain(|_, state| state.expires_at > now);
+            families.retain(|_, state| keep(state, now));
             let (outcome, change) = decide(families);
             if let Some(record) = change {
                 if let Some(journal) = journal.as_mut() {
@@ -260,6 +262,14 @@ impl FamilyStore {
         }
         result
     }
+}
+
+/// Whether a family still needs a slot. A revoked family is refused exactly as
+/// an unknown one is, so it is dropped (and left out of compaction) at once
+/// instead of counting toward the capacity until it expires; otherwise
+/// authorizing a few thousand times would lock everyone else out.
+fn keep(state: &FamilyState, now: DateTime<Utc>) -> bool {
+    !state.revoked && state.expires_at > now
 }
 
 fn apply(families: &mut Families, record: Record) {
@@ -484,8 +494,8 @@ mod tests {
         let mut store = FamilyStore::open(&path, 16)?;
         assert_eq!(store.check("a", 3)?, Outcome::Accepted);
         assert_eq!(store.get("a")?.unwrap().current, 3);
-        assert_eq!(store.check("b", 1)?, Outcome::Revoked);
-        assert_eq!(store.rotate("b", 1, later())?, Outcome::Revoked);
+        assert_eq!(store.check("b", 1)?, Outcome::Unknown);
+        assert_eq!(store.rotate("b", 1, later())?, Outcome::Unknown);
         assert_eq!(store.check("c", 1)?, Outcome::Unknown);
 
         #[cfg(unix)]
@@ -502,8 +512,41 @@ mod tests {
         store.start("a", later())?;
         assert_eq!(store.rotate("a", 1, later())?, Outcome::Accepted);
         assert_eq!(store.rotate("a", 1, later())?, Outcome::Reused);
-        assert_eq!(store.check("a", 2)?, Outcome::Revoked);
+        assert_eq!(store.check("a", 2)?, Outcome::Unknown);
         assert_eq!(store.rotate("missing", 1, later())?, Outcome::Unknown);
+        Ok(())
+    }
+
+    #[test]
+    fn revoked_families_do_not_count_toward_capacity() -> anyhow::Result<()> {
+        let mut store = FamilyStore::in_memory(2);
+        store.start("a", later())?;
+        store.start("b", later())?;
+        assert_eq!(store.start("c", later())?, Outcome::Full);
+        // Reusing a spent token revokes the family; its slot is free again.
+        assert_eq!(store.rotate("a", 1, later())?, Outcome::Accepted);
+        assert_eq!(store.rotate("a", 1, later())?, Outcome::Reused);
+        assert_eq!(store.start("c", later())?, Outcome::Accepted);
+        // A revoked family is refused like an unknown one.
+        assert_eq!(store.check("a", 2)?, Outcome::Unknown);
+        assert_eq!(store.start("d", later())?, Outcome::Full);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn revoked_families_are_dropped_from_the_journal_on_open() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("families.jsonl");
+        let mut store = FamilyStore::open(&path, 16)?;
+        store.start("a", later())?;
+        store.start("b", later())?;
+        assert_eq!(store.check("a", 2)?, Outcome::Reused);
+        drop(store);
+        let mut store = FamilyStore::open(&path, 16)?;
+        assert_eq!(fs::read_to_string(&path)?.lines().count(), 1);
+        assert_eq!(store.check("a", 1)?, Outcome::Unknown);
+        assert_eq!(store.check("b", 1)?, Outcome::Accepted);
         Ok(())
     }
 
@@ -590,7 +633,7 @@ mod tests {
         assert_eq!(old.rotate("a", 1, later())?, Outcome::Accepted);
         // The new process cannot redeem the generation the old one spent.
         assert_eq!(new.rotate("a", 1, later())?, Outcome::Reused);
-        assert_eq!(old.check("a", 2)?, Outcome::Revoked);
+        assert_eq!(old.check("a", 2)?, Outcome::Unknown);
         Ok(())
     }
 
@@ -653,7 +696,7 @@ mod tests {
             assert!(
                 outcomes.iter().all(|outcome| matches!(
                     outcome,
-                    Outcome::Accepted | Outcome::Reused | Outcome::Revoked
+                    Outcome::Accepted | Outcome::Reused | Outcome::Unknown
                 )),
                 "round {round}: {outcomes:?}"
             );
