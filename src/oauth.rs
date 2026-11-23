@@ -928,11 +928,17 @@ async fn refresh_refusal(state: &OAuthState, family: &str, outcome: Outcome) -> 
             "temporarily_unavailable",
             "Authorization grant capacity is temporarily exhausted.",
         ),
-        Outcome::Unknown | Outcome::Accepted => oauth_json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "Refresh token is no longer valid; sign in again.",
-        ),
+        // A revoked family is dropped from the store (see refresh_families::keep),
+        // so it reads as Unknown here, including one another process revoked:
+        // forget its cached session too.
+        Outcome::Unknown | Outcome::Accepted => {
+            state.inner.refresh_sessions.write().await.remove(family);
+            oauth_json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "Refresh token is no longer valid; sign in again.",
+            )
+        }
     }
 }
 
