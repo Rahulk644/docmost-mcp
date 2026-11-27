@@ -86,7 +86,9 @@ For browser session authentication, set `DOCMOST_MCP_BROWSER_URL` to the
 public **Docmost origin**, such as `https://docs.example.com`. Keep
 `DOCMOST_MCP_PUBLIC_URL` set to your MCP origin. Forward `/oauth/authorize`
 and `/oauth/resume` on the Docmost origin to this MCP service, preserving
-`Host` and cookies. Add the Docmost host and origin to the MCP allowlists.
+`Host` and cookies. If you set `DOCMOST_MCP_MIN_SESSION_REMAINING`, also
+forward `POST /oauth/renew` on the Docmost origin with the same headers.
+Add the Docmost host and origin to the MCP allowlists.
 Do not forward Docmost's `/login` or `/api` routes to MCP.
 
 OAuth discovery advertises authorization on the Docmost origin. Users open
