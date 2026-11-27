@@ -88,7 +88,9 @@ For browser session authentication, set `DOCMOST_MCP_BROWSER_URL` to the
 public **Docmost origin**, such as `https://docs.example.com`. Keep
 `DOCMOST_MCP_PUBLIC_URL` set to your MCP origin. Forward `/oauth/authorize`
 and `/oauth/resume` on the Docmost origin to this MCP service, preserving
-`Host` and cookies. Add the Docmost host and origin to the MCP allowlists.
+`Host` and cookies. If you set `DOCMOST_MCP_MIN_SESSION_REMAINING`, also
+forward `POST /oauth/renew` on the Docmost origin with the same headers.
+Add the Docmost host and origin to the MCP allowlists.
 Do not forward Docmost's `/login` or `/api` routes to MCP.
 
 OAuth discovery advertises authorization on the Docmost origin. Users open
@@ -111,6 +113,21 @@ DOCMOST_MCP_BRAND=Docmost
 DOCMOST_MCP_ALLOWED_HOSTS=mcp.example.com,docs.example.com
 DOCMOST_MCP_ALLOWED_ORIGINS=https://mcp.example.com,https://docs.example.com
 ```
+
+A connection never outlives the Docmost session it was granted from: refresh
+tokens expire with that session. Consent normally reuses the browser's
+current session, so a session signed in six days ago yields a connection
+that ends a day later. To avoid that, set `DOCMOST_MCP_MIN_SESSION_REMAINING`
+(e.g. `6d23h` with Docmost's `JWT_TOKEN_EXPIRES_IN=7d`). A session with less
+time left is not offered for consent. Docmost's `/login` forwards a
+signed-in browser straight to the app, so the page offers a "Sign out and
+continue" button: it expires Docmost's `authToken` cookie in this browser
+(the session itself is not revoked, so connections already granted from it
+keep working until it ends) and then shows the usual sign-in link. Signing
+in again gives the browser, and the connection, a full-length session.
+Signing out from Docmost's own menu works too. Keep the value below
+Docmost's session lifetime, or no session ever qualifies; values over
+`3650d` are rejected at startup.
 
 Without `DOCMOST_MCP_BROWSER_URL`, the existing credential relay remains
 available for deployments that cannot route OAuth on the Docmost origin.
@@ -194,6 +211,7 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_MCP_PUBLIC_URL` | — | Public HTTPS origin; required when account auth is enabled, and enables `docmost_begin_upload` |
 | `DOCMOST_MCP_MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | Largest file `docmost_begin_upload` accepts |
 | `DOCMOST_MCP_BRAND` | `Docmost` | Product name on the sign-in pages, for rebranded deployments |
+| `DOCMOST_MCP_MIN_SESSION_REMAINING` | unset | Browser login: least lifetime (e.g. `6d23h`) a Docmost session needs to be offered for consent; shorter ones must sign in again |
 | `DOCMOST_MCP_BIND` | `127.0.0.1:8787` | HTTP listen address |
 | `DOCMOST_MCP_ALLOWED_HOSTS` | loopback | Comma-separated Host allowlist |
 | `DOCMOST_MCP_ALLOWED_ORIGINS` | loopback | Comma-separated browser Origin allowlist |
