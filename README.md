@@ -70,10 +70,18 @@ export DOCMOST_MCP_BEARER_TOKEN="$(openssl rand -hex 32)" # break-glass only
 
 An OAuth-capable MCP client pointed at `https://mcp.example.com/mcp` discovers the
 login page automatically. Authorization uses code flow with PKCE and dynamic
-client registration. Access and refresh grants are held in memory, so a server
-restart intentionally requires users to sign in again. Signing out of Docmost
-does the same: once Docmost rejects the session behind a grant, `/mcp` answers
-401 and the client re-runs the login.
+client registration. Access tokens are held in memory. Refresh tokens are
+sealed (AES-256-GCM) and held only by the client, so clients reconnect after a
+server restart by refreshing, without signing in again. Each refresh checks the
+Docmost session with Docmost first: signing out of Docmost also cuts off the
+MCP connection at its next refresh. The sealing key is created on first start
+in `~/.docmost-local-mcp/refresh-token.key`; keep that file on persistent
+storage, and protect it like a credential (see [SECURITY.md](SECURITY.md)).
+Rotation state (which refresh tokens are spent or revoked; no secrets) is kept
+in `~/.docmost-local-mcp/refresh-token-families.jsonl` on the same persistent,
+writable storage.
+Once Docmost rejects the session behind a grant, `/mcp` answers 401; the
+client's refresh is refused too, so it re-runs the login.
 
 Verify:
 
@@ -133,8 +141,7 @@ Without `DOCMOST_MCP_BROWSER_URL`, the existing credential relay remains
 available for deployments that cannot route OAuth on the Docmost origin.
 Use the generic OSS image for personal deployments; a company-branded image
 may have compiled-in company text or assets even when its environment is
-changed. Reconnect clients after restarting MCP because OAuth grants are
-held in memory.
+changed.
 
 ## Tools
 
@@ -183,7 +190,9 @@ when it hasn't, and never pages forever off a bad inference.
   placeholder values are rejected outright.
 - Account authorization uses OAuth authorization code + PKCE, exact registered
   redirects, CSRF protection, per-account failed-login throttling, one-time codes,
-  and short-lived opaque tokens. Docmost passwords are never persisted.
+  short-lived access tokens, and single-use, sealed refresh tokens. Docmost
+  passwords are never persisted, and Docmost session tokens are never written to
+  the server's disk.
 - Host and Origin allowlists are enforced (DNS-rebinding protection).
 - `/health` is public and returns only service status.
 - `/uploads/{token}` accepts one `PUT` per staged upload, with no bearer token: the
@@ -217,6 +226,8 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_MCP_ALLOWED_ORIGINS` | loopback | Comma-separated browser Origin allowlist |
 | `DOCMOST_MCP_ENABLE_WRITES` | `false` | Enables mutations; calls still require `confirm: true` |
 | `DOCMOST_MCP_AUDIT_LOG` | `~/.docmost-local-mcp/mutations.jsonl` | Mutation audit file |
+| `DOCMOST_MCP_REFRESH_KEY_FILE` | `~/.docmost-local-mcp/refresh-token.key` | Key that seals account-auth refresh tokens; created on first start |
+| `DOCMOST_MCP_REFRESH_STATE_FILE` | `~/.docmost-local-mcp/refresh-token-families.jsonl` | Refresh-token rotation and revocation state (no secrets); must be writable |
 | `DOCMOST_ALLOW_FILE_CREDENTIALS` | `false` | Opts into the encrypted-file credential fallback |
 
 > The on-disk state directory is still `~/.docmost-local-mcp/`, retained from before

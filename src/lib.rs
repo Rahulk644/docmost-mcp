@@ -7,6 +7,7 @@ pub mod key_file;
 pub mod oauth;
 pub mod position;
 pub mod prosemirror;
+pub mod refresh_families;
 pub mod server;
 pub mod staged_upload;
 pub mod startup_config;
