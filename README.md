@@ -80,6 +80,8 @@ storage, and protect it like a credential (see [SECURITY.md](SECURITY.md)).
 Rotation state (which refresh tokens are spent or revoked; no secrets) is kept
 in `~/.docmost-local-mcp/refresh-token-families.jsonl` on the same persistent,
 writable storage.
+Once Docmost rejects the session behind a grant, `/mcp` answers 401; the
+client's refresh is refused too, so it re-runs the login.
 
 Verify:
 
@@ -94,7 +96,9 @@ For browser session authentication, set `DOCMOST_MCP_BROWSER_URL` to the
 public **Docmost origin**, such as `https://docs.example.com`. Keep
 `DOCMOST_MCP_PUBLIC_URL` set to your MCP origin. Forward `/oauth/authorize`
 and `/oauth/resume` on the Docmost origin to this MCP service, preserving
-`Host` and cookies. Add the Docmost host and origin to the MCP allowlists.
+`Host` and cookies. If you set `DOCMOST_MCP_MIN_SESSION_REMAINING`, also
+forward `POST /oauth/renew` on the Docmost origin with the same headers.
+Add the Docmost host and origin to the MCP allowlists.
 Do not forward Docmost's `/login` or `/api` routes to MCP.
 
 OAuth discovery advertises authorization on the Docmost origin. Users open
@@ -118,6 +122,21 @@ DOCMOST_MCP_ALLOWED_HOSTS=mcp.example.com,docs.example.com
 DOCMOST_MCP_ALLOWED_ORIGINS=https://mcp.example.com,https://docs.example.com
 ```
 
+A connection never outlives the Docmost session it was granted from: refresh
+tokens expire with that session. Consent normally reuses the browser's
+current session, so a session signed in six days ago yields a connection
+that ends a day later. To avoid that, set `DOCMOST_MCP_MIN_SESSION_REMAINING`
+(e.g. `6d23h` with Docmost's `JWT_TOKEN_EXPIRES_IN=7d`). A session with less
+time left is not offered for consent. Docmost's `/login` forwards a
+signed-in browser straight to the app, so the page offers a "Sign out and
+continue" button: it expires Docmost's `authToken` cookie in this browser
+(the session itself is not revoked, so connections already granted from it
+keep working until it ends) and then shows the usual sign-in link. Signing
+in again gives the browser, and the connection, a full-length session.
+Signing out from Docmost's own menu works too. Keep the value below
+Docmost's session lifetime, or no session ever qualifies; values over
+`3650d` are rejected at startup.
+
 Without `DOCMOST_MCP_BROWSER_URL`, the existing credential relay remains
 available for deployments that cannot route OAuth on the Docmost origin.
 Use the generic OSS image for personal deployments; a company-branded image
@@ -137,10 +156,23 @@ loaded alongside this one.
 **Write** — `docmost_create_page`, `docmost_update_page`, `docmost_duplicate_page`,
 `docmost_copy_page_to_space`, `docmost_move_page`, `docmost_move_page_to_space`,
 `docmost_create_space`, `docmost_update_space`, `docmost_create_comment`,
-`docmost_update_comment`
+`docmost_update_comment`, `docmost_begin_upload`
 
 Write tools are gated twice — see [docs/write-tools.md](docs/write-tools.md) for the
 confirmation contract.
+
+A remote server cannot read the client's disk, and a file passed in the tool call
+would have to be reproduced byte by byte as model output. So `docmost_begin_upload`
+takes the file's size and SHA-256 and returns a single-use URL; the client then sends
+the raw file with an ordinary HTTP `PUT` (`curl -T file <url>`). The response gives
+the attachment's `/api/files/{id}/{name}` path, which page Markdown can embed
+(`![alt](path)`) or link.
+
+A failed `PUT` answers JSON with `uploaded` (`true`, `false` for a known rejection
+before storage, or `null` when Docmost may have stored the file) and `retrySameUrl`
+(`true` only when the server was busy and the same URL can be sent again). After
+`null`, check the page's attachments before uploading again. See
+[docs/write-tools.md](docs/write-tools.md).
 
 ### Pagination
 
@@ -163,10 +195,14 @@ when it hasn't, and never pages forever off a bad inference.
   the server's disk.
 - Host and Origin allowlists are enforced (DNS-rebinding protection).
 - `/health` is public and returns only service status.
+- `/uploads/{token}` accepts one `PUT` per staged upload, with no bearer token: the
+  URL is the credential. Its 256-bit token is bound to one page, file, size and
+  SHA-256, works once, expires after 10 minutes, and carries only the session that
+  created it.
 - **Mutating tools are disabled** unless `DOCMOST_MCP_ENABLE_WRITES=true`, *and*
   every mutation additionally requires `confirm: true` in that individual call.
 - Mutation *metadata* is appended to a mode-`0600` JSONL audit log. Page and comment
-  bodies are never logged.
+  bodies and uploaded file contents are never logged.
 - Credentials come from environment variables or the OS keychain. The
   encrypted-file fallback is opt-in.
 
@@ -181,8 +217,10 @@ See [SECURITY.md](SECURITY.md) for deployment boundaries and how to report issue
 | `DOCMOST_EMAIL`, `DOCMOST_PASSWORD` | — | Community-edition fallback; both must be set |
 | `DOCMOST_MCP_BEARER_TOKEN` | required unless account auth is enabled | Static local/break-glass token for `/mcp` |
 | `DOCMOST_MCP_ACCOUNT_AUTH` | `false` | Enables per-account browser login and OAuth discovery |
-| `DOCMOST_MCP_PUBLIC_URL` | — | Public HTTPS origin; required when account auth is enabled |
+| `DOCMOST_MCP_PUBLIC_URL` | — | Public HTTPS origin; required when account auth is enabled, and enables `docmost_begin_upload` |
+| `DOCMOST_MCP_MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | Largest file `docmost_begin_upload` accepts |
 | `DOCMOST_MCP_BRAND` | `Docmost` | Product name on the sign-in pages, for rebranded deployments |
+| `DOCMOST_MCP_MIN_SESSION_REMAINING` | unset | Browser login: least lifetime (e.g. `6d23h`) a Docmost session needs to be offered for consent; shorter ones must sign in again |
 | `DOCMOST_MCP_BIND` | `127.0.0.1:8787` | HTTP listen address |
 | `DOCMOST_MCP_ALLOWED_HOSTS` | loopback | Comma-separated Host allowlist |
 | `DOCMOST_MCP_ALLOWED_ORIGINS` | loopback | Comma-separated browser Origin allowlist |

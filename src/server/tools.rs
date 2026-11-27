@@ -1,7 +1,7 @@
 use rmcp::{handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
 
 use crate::{
-    auth::manager::AuthManager,
+    auth::manager::{AuthManager, SessionRejectedHook},
     prosemirror::prosemirror_to_markdown,
     server::{
         DocmostMcpServer, internal_error,
@@ -42,8 +42,12 @@ impl DocmostMcpServer {
         Self::from_auth_manager(auth_manager)
     }
 
-    pub fn new_with_session(session: AuthenticatedSession) -> anyhow::Result<Self> {
-        let auth_manager = AuthManager::from_session(session)?;
+    pub fn new_with_session(
+        session: AuthenticatedSession,
+        on_session_rejected: SessionRejectedHook,
+    ) -> anyhow::Result<Self> {
+        let auth_manager =
+            AuthManager::from_session(session)?.with_session_rejected_hook(on_session_rejected);
         Self::from_auth_manager(auth_manager)
     }
 
@@ -53,11 +57,13 @@ impl DocmostMcpServer {
             client,
             tool_router: Self::tool_router()
                 + Self::page_write_tool_router()
-                + Self::write_tool_router(),
+                + Self::write_tool_router()
+                + Self::attachment_tool_router(),
             writes_enabled: matches!(
                 std::env::var("DOCMOST_MCP_ENABLE_WRITES").ok().as_deref(),
                 Some("1") | Some("true")
             ),
+            stager: None,
         })
     }
 

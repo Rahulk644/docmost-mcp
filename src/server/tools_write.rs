@@ -8,7 +8,7 @@
 use rmcp::{handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
 
 use crate::{
-    prosemirror::markdown_to_prosemirror,
+    prosemirror::{WriteContext, markdown_to_prosemirror_in},
     server::{DocmostMcpServer, internal_error, render::format_optional_id},
     types::{
         CopyPageToSpaceInput, CreateCommentInput, CreateSpaceInput, DocmostComment, DocmostPage,
@@ -215,7 +215,7 @@ impl DocmostMcpServer {
                 None,
             ));
         }
-        let content = markdown_to_prosemirror(&input.markdown);
+        let content = markdown_to_prosemirror_in(&input.markdown, WriteContext::Comment);
         let comment = self
             .run_write(
                 input.confirm,
@@ -249,7 +249,7 @@ impl DocmostMcpServer {
                 None,
             ));
         }
-        let content = markdown_to_prosemirror(&input.markdown);
+        let content = markdown_to_prosemirror_in(&input.markdown, WriteContext::Comment);
         let comment = self
             .run_write(
                 input.confirm,

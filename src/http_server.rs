@@ -3,12 +3,13 @@ use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{any, get},
 };
+use futures::{FutureExt, StreamExt, stream};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -18,12 +19,17 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use crate::{
-    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState},
+    auth::manager::SessionRejectedHook,
+    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState, parse_duration},
     server::DocmostMcpServer,
+    staged_upload::{self, DEFAULT_MAX_STAGED_BYTES, UploadStager},
     types::{AuthenticatedSession, StartupConfig},
 };
 
 const MIN_BEARER_TOKEN_BYTES: usize = 32;
+/// SSE frames a response may open with before its first JSON-RPC message (the
+/// rmcp priming event). Anything else ends the hold and the stream flows on.
+const MAX_HELD_FRAMES: usize = 4;
 
 fn validate_bearer_token(token: &str) -> Result<()> {
     if token.len() < MIN_BEARER_TOKEN_BYTES {
@@ -54,6 +60,7 @@ struct AppState {
     user_services: Arc<RwLock<HashMap<String, McpService>>>,
     mcp_config: StreamableHttpServerConfig,
     oauth: Option<OAuthState>,
+    stager: Option<UploadStager>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +70,11 @@ pub struct HttpServerConfig {
     pub allowed_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
     pub oauth: Option<OAuthConfig>,
+    /// This server's externally reachable base URL (`DOCMOST_MCP_PUBLIC_URL`). Staged
+    /// uploads are offered only when it is set, since their URLs are built under it.
+    pub public_url: Option<String>,
+    /// Largest staged upload accepted, in bytes (`DOCMOST_MCP_MAX_UPLOAD_BYTES`).
+    pub max_staged_upload_bytes: usize,
 }
 
 impl HttpServerConfig {
@@ -113,6 +125,10 @@ impl HttpServerConfig {
                 docmost_base_url: env::var("DOCMOST_BASE_URL")
                     .context("DOCMOST_BASE_URL is required for account authentication")?,
                 browser_url: env::var("DOCMOST_MCP_BROWSER_URL").ok(),
+                client_id_key_path: Some(state_file_path(
+                    "DOCMOST_MCP_CLIENT_ID_KEY_FILE",
+                    "client-id.key",
+                )?),
                 refresh_token_key_path: Some(state_file_path(
                     "DOCMOST_MCP_REFRESH_KEY_FILE",
                     "refresh-token.key",
@@ -122,9 +138,22 @@ impl HttpServerConfig {
                     "refresh-token-families.jsonl",
                 )?),
                 brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
+                min_session_remaining: env::var("DOCMOST_MCP_MIN_SESSION_REMAINING")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| parse_duration(&value))
+                    .transpose()
+                    .context("DOCMOST_MCP_MIN_SESSION_REMAINING")?,
             })
         } else {
             None
+        };
+        let public_url = staged_upload_public_url(env::var("DOCMOST_MCP_PUBLIC_URL").ok());
+        let max_staged_upload_bytes = match env::var("DOCMOST_MCP_MAX_UPLOAD_BYTES") {
+            Ok(value) => value.trim().parse::<usize>().ok().filter(|n| *n > 0).with_context(|| {
+                format!("DOCMOST_MCP_MAX_UPLOAD_BYTES must be a positive number of bytes, got {value:?}")
+            })?,
+            Err(_) => DEFAULT_MAX_STAGED_BYTES,
         };
         if bearer_token.is_none() && oauth.is_none() {
             bail!(
@@ -138,7 +167,26 @@ impl HttpServerConfig {
             allowed_hosts,
             allowed_origins,
             oauth,
+            public_url,
+            max_staged_upload_bytes,
         })
+    }
+}
+
+/// The base for staged-upload URLs. It goes through the same origin validation as account
+/// auth, so a token and file are never sent over plain HTTP outside localhost and the URL
+/// has no path, query or fragment to break `/uploads/{token}`. Account auth already fails
+/// startup on an invalid value; in bearer-only mode the variable was unused before staged
+/// uploads, so an invalid value turns them off with a warning rather than refusing to
+/// start a working deployment.
+fn staged_upload_public_url(raw: Option<String>) -> Option<String> {
+    let raw = raw.filter(|value| !value.trim().is_empty())?;
+    match crate::oauth::normalize_public_url(raw.trim()) {
+        Ok(url) => Some(url),
+        Err(error) => {
+            tracing::warn!(%error, "DOCMOST_MCP_PUBLIC_URL is not a valid public origin; staged uploads are disabled");
+            None
+        }
     }
 }
 
@@ -184,11 +232,28 @@ pub async fn serve_http(startup_config: StartupConfig, config: HttpServerConfig)
 }
 
 fn build_router(startup_config: StartupConfig, config: HttpServerConfig) -> Result<Router> {
+    build_app(startup_config, config).map(|(router, _)| router)
+}
+
+/// The router plus its OAuth state, which tests use to issue grants directly.
+fn build_app(
+    startup_config: StartupConfig,
+    config: HttpServerConfig,
+) -> Result<(Router, Option<OAuthState>)> {
     let mcp_config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(config.allowed_hosts)
         .with_allowed_origins(config.allowed_origins);
+    let stager = config
+        .public_url
+        .as_deref()
+        .map(|url| UploadStager::new(url, config.max_staged_upload_bytes));
+    let admin_stager = stager.clone();
     let admin_service = StreamableHttpService::new(
-        move || DocmostMcpServer::new(startup_config.clone()).map_err(std::io::Error::other),
+        move || {
+            DocmostMcpServer::new(startup_config.clone())
+                .map(|server| server.with_stager(admin_stager.clone()))
+                .map_err(std::io::Error::other)
+        },
         LocalSessionManager::default().into(),
         mcp_config.clone(),
     );
@@ -201,6 +266,7 @@ fn build_router(startup_config: StartupConfig, config: HttpServerConfig) -> Resu
         user_services: Arc::new(RwLock::new(HashMap::new())),
         mcp_config,
         oauth: oauth.clone(),
+        stager: stager.clone(),
     };
 
     let mut router = Router::new()
@@ -208,10 +274,13 @@ fn build_router(startup_config: StartupConfig, config: HttpServerConfig) -> Resu
         .route("/mcp", any(handle_mcp))
         .route("/mcp/", any(handle_mcp))
         .with_state(state);
-    if let Some(oauth) = oauth {
+    if let Some(oauth) = oauth.clone() {
         router = router.merge(oauth.routes());
     }
-    Ok(router)
+    if let Some(stager) = stager {
+        router = router.merge(staged_upload::routes(stager));
+    }
+    Ok((router, oauth))
 }
 
 async fn health() -> impl IntoResponse {
@@ -238,31 +307,165 @@ async fn handle_mcp(State(state): State<AppState>, request: Request<Body>) -> Re
     if let (Some(oauth), Some(token)) = (&state.oauth, supplied)
         && let Some(session) = oauth.access_session(token).await
     {
+        let token = token.to_string();
         let key = OAuthState::session_fingerprint(&session);
         let active_sessions = oauth.active_session_fingerprints().await;
         let service = {
             let mut services = state.user_services.write().await;
             services.retain(|fingerprint, _| active_sessions.contains(fingerprint));
             services
-                .entry(key)
-                .or_insert_with(|| user_mcp_service(session, state.mcp_config.clone()))
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    let on_rejected = session_rejected_hook(&state, oauth, key);
+                    user_mcp_service(
+                        session,
+                        on_rejected,
+                        state.mcp_config.clone(),
+                        state.stager.clone(),
+                    )
+                })
                 .clone()
         };
-        return call_mcp_service(service, request).await;
+        let is_post = request.method() == Method::POST;
+        let response = call_mcp_service(service, request).await;
+        if !is_post {
+            return response;
+        }
+        return unauthorized_if_grant_revoked(&state, oauth, &token, response).await;
     }
 
     unauthorized(&state)
 }
 
+/// When Docmost rejects a user's session, drop every grant that carries it and
+/// the MCP service built on it, so the client is sent back through OAuth.
+fn session_rejected_hook(
+    state: &AppState,
+    oauth: &OAuthState,
+    fingerprint: String,
+) -> SessionRejectedHook {
+    let oauth = oauth.clone();
+    let services = state.user_services.clone();
+    Arc::new(move || {
+        let oauth = oauth.clone();
+        let services = services.clone();
+        let fingerprint = fingerprint.clone();
+        async move {
+            oauth.revoke_session(&fingerprint).await;
+            services.write().await.remove(&fingerprint);
+            tracing::info!("Docmost rejected an account session; revoked its MCP grants");
+        }
+        .boxed()
+    })
+}
+
 fn user_mcp_service(
     session: AuthenticatedSession,
+    on_rejected: SessionRejectedHook,
     config: StreamableHttpServerConfig,
+    stager: Option<UploadStager>,
 ) -> McpService {
     StreamableHttpService::new(
-        move || DocmostMcpServer::new_with_session(session.clone()).map_err(std::io::Error::other),
+        move || {
+            DocmostMcpServer::new_with_session(session.clone(), on_rejected.clone())
+                .map(|server| server.with_stager(stager.clone()))
+                .map_err(std::io::Error::other)
+        },
         LocalSessionManager::default().into(),
         config,
     )
+}
+
+/// Answer 401 for the very call that discovered a rejected Docmost session.
+///
+/// rmcp returns a request's status and headers before the tool runs, and the
+/// result follows on the SSE stream, so a tool error arrives under a 200 and
+/// the client still believes it is connected. The response is therefore held
+/// back until its first JSON-RPC message: if that message is an error and the
+/// grant that authorized the request was revoked meanwhile, the client gets
+/// the normal 401 challenge instead and re-runs OAuth straight away.
+///
+/// Successful results always pass through, even if the grant was revoked
+/// concurrently by another call, so a write that Docmost accepted is never
+/// reported as unauthorized. Streams that open with anything other than the
+/// priming event (a keep-alive during a slow call, for instance) pass through
+/// too; the grant is gone either way, so the next request gets the 401.
+async fn unauthorized_if_grant_revoked(
+    state: &AppState,
+    oauth: &OAuthState,
+    token: &str,
+    response: Response,
+) -> Response {
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    let (parts, body) = response.into_parts();
+    let mut frames = body.into_data_stream();
+    let mut held = Vec::new();
+    let mut first_message = None;
+    while held.len() < MAX_HELD_FRAMES {
+        let Some(frame) = frames.next().await else {
+            break;
+        };
+        let event = match &frame {
+            Ok(bytes) if is_json => HeldFrame::Message(bytes.clone()),
+            Ok(bytes) => classify_sse_frame(bytes),
+            Err(_) => HeldFrame::Other,
+        };
+        held.push(frame);
+        match event {
+            HeldFrame::Priming => {}
+            HeldFrame::Message(message) => {
+                first_message = Some(message);
+                break;
+            }
+            HeldFrame::Other => break,
+        }
+    }
+
+    if first_message.is_some_and(|message| is_jsonrpc_error(&message))
+        && oauth.access_session(token).await.is_none()
+    {
+        return unauthorized(state);
+    }
+    Response::from_parts(parts, Body::from_stream(stream::iter(held).chain(frames)))
+}
+
+enum HeldFrame {
+    Priming,
+    Message(Bytes),
+    Other,
+}
+
+/// rmcp writes one SSE event per body frame, each message as a single
+/// `data:` line. An event with no data is the priming event.
+fn classify_sse_frame(frame: &Bytes) -> HeldFrame {
+    let Ok(text) = std::str::from_utf8(frame) else {
+        return HeldFrame::Other;
+    };
+    if text.starts_with(':') {
+        return HeldFrame::Other;
+    }
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|data| data.strip_prefix(' ').unwrap_or(data))
+        .collect::<String>();
+    if data.is_empty() {
+        HeldFrame::Priming
+    } else {
+        HeldFrame::Message(Bytes::from(data))
+    }
+}
+
+fn is_jsonrpc_error(message: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(message)
+        .is_ok_and(|message| message.get("error").is_some())
 }
 
 async fn call_mcp_service(service: McpService, request: Request<Body>) -> Response {
@@ -301,6 +504,31 @@ mod tests {
     use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN};
 
     #[test]
+    fn staged_upload_public_url_requires_a_valid_https_origin() {
+        let url = |value: &str| staged_upload_public_url(Some(value.to_string()));
+        assert_eq!(
+            url("https://mcp.example.com/").as_deref(),
+            Some("https://mcp.example.com")
+        );
+        assert_eq!(
+            url("http://127.0.0.1:8787").as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+        assert_eq!(staged_upload_public_url(None), None);
+        assert_eq!(url("  "), None);
+        for bad in [
+            "http://mcp.example.com",
+            "https://mcp.example.com/base",
+            "https://mcp.example.com/?x=1",
+            "https://mcp.example.com/#frag",
+            "https://user:pw@mcp.example.com",
+            "not a url",
+        ] {
+            assert_eq!(url(bad), None, "{bad:?} must not enable staged uploads");
+        }
+    }
+
+    #[test]
     fn parses_comma_separated_values() {
         unsafe { env::set_var("DOCMOST_MCP_TEST_LIST", " a.example, b.example ") };
         assert_eq!(
@@ -336,6 +564,8 @@ mod tests {
                 allowed_hosts: vec![address.to_string()],
                 allowed_origins: vec![format!("http://{address}")],
                 oauth: None,
+                public_url: None,
+                max_staged_upload_bytes: DEFAULT_MAX_STAGED_BYTES,
             },
         )?;
         let task = tokio::spawn(async move { axum::serve(listener, app).await });
@@ -386,5 +616,292 @@ mod tests {
 
         task.abort();
         Ok(())
+    }
+
+    /// Mock Docmost that accepts any bearer token not in `revoked`.
+    async fn spawn_mock_docmost(
+        revoked: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
+        use axum::{http::HeaderMap, routing::post};
+
+        fn session_is_live(
+            revoked: &std::sync::Mutex<std::collections::HashSet<String>>,
+            headers: &HeaderMap,
+        ) -> bool {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .is_some_and(|token| !revoked.lock().unwrap().contains(token))
+        }
+
+        let me_revoked = revoked.clone();
+        let app = Router::new()
+            .route(
+                "/api/users/me",
+                post(move |headers: HeaderMap| async move {
+                    if !session_is_live(&me_revoked, &headers) {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    Json(json!({ "data": { "user": { "email": "user@example.com" } } }))
+                        .into_response()
+                }),
+            )
+            .route(
+                "/api/spaces",
+                post(move |headers: HeaderMap| async move {
+                    if !session_is_live(&revoked, &headers) {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    Json(json!({ "data": { "items": [] } })).into_response()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((address, task))
+    }
+
+    fn test_session(base_url: &str, email: &str, token: &str) -> AuthenticatedSession {
+        AuthenticatedSession {
+            base_url: base_url.to_string(),
+            email: email.to_string(),
+            token: token.to_string(),
+            expires_at: None,
+        }
+    }
+
+    struct McpTestClient {
+        client: reqwest::Client,
+        endpoint: String,
+        origin: String,
+        token: String,
+        session_id: Option<String>,
+    }
+
+    impl McpTestClient {
+        async fn post(&self, body: serde_json::Value) -> Result<reqwest::Response> {
+            let mut request = self
+                .client
+                .post(&self.endpoint)
+                .header(AUTHORIZATION, format!("Bearer {}", self.token))
+                .header(ACCEPT, "application/json, text/event-stream")
+                .header(CONTENT_TYPE, "application/json")
+                .header(ORIGIN, &self.origin)
+                .json(&body);
+            if let Some(session_id) = &self.session_id {
+                request = request.header("mcp-session-id", session_id);
+            }
+            Ok(request.send().await?)
+        }
+
+        async fn initialize(&mut self) -> Result<()> {
+            let response = self
+                .post(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": { "name": "revocation-test", "version": "1.0.0" }
+                    }
+                }))
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            self.session_id = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned);
+            response.text().await?;
+            let initialized = self
+                .post(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+                .await?;
+            assert!(initialized.status().is_success());
+            Ok(())
+        }
+
+        async fn list_spaces(&self) -> Result<reqwest::Response> {
+            self.post(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "docmost_list_spaces", "arguments": {} }
+            }))
+            .await
+        }
+    }
+
+    /// The first JSON-RPC message on an SSE response body.
+    fn first_sse_message(body: &str) -> serde_json::Value {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find(|data| !data.is_empty())
+            .and_then(|data| serde_json::from_str(data).ok())
+            .expect("SSE body carries a JSON-RPC message")
+    }
+
+    fn assert_oauth_challenge(response: &reqwest::Response, metadata_url: &str) {
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer resource_metadata=\"{metadata_url}\"").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_docmost_session_revokes_its_grants_and_answers_401() -> Result<()> {
+        let revoked = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let (docmost, docmost_task) = spawn_mock_docmost(revoked.clone()).await?;
+        let docmost_url = format!("http://{docmost}");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let public_url = format!("http://{address}");
+        let (app, oauth) = build_app(
+            StartupConfig::default(),
+            HttpServerConfig {
+                bind: address,
+                bearer_token: None,
+                allowed_hosts: vec![address.to_string()],
+                allowed_origins: vec![public_url.clone()],
+                oauth: Some(OAuthConfig {
+                    public_url: public_url.clone(),
+                    docmost_base_url: docmost_url.clone(),
+                    browser_url: None,
+                    brand: DEFAULT_BRAND.to_string(),
+                    client_id_key_path: None,
+                    min_session_remaining: None,
+                    refresh_token_key_path: None,
+                    refresh_state_path: None,
+                }),
+                public_url: None,
+                max_staged_upload_bytes: DEFAULT_MAX_STAGED_BYTES,
+            },
+        )?;
+        let oauth = oauth.expect("account auth is enabled");
+        let task = tokio::spawn(async move { axum::serve(listener, app).await });
+        let metadata_url = oauth.resource_metadata_url();
+
+        let (alice_access, alice_refresh) = oauth
+            .issue_tokens_for_test(
+                "client-a",
+                test_session(&docmost_url, "alice@example.com", "alice-docmost"),
+            )
+            .await;
+        let (bob_access, bob_refresh) = oauth
+            .issue_tokens_for_test(
+                "client-b",
+                test_session(&docmost_url, "bob@example.com", "bob-docmost"),
+            )
+            .await;
+        let (_, carol_refresh) = oauth
+            .issue_tokens_for_test(
+                "client-c",
+                test_session(&docmost_url, "carol@example.com", "carol-docmost"),
+            )
+            .await;
+
+        let http = reqwest::Client::new();
+        let mcp_client = |token: &str| McpTestClient {
+            client: http.clone(),
+            endpoint: format!("{public_url}/mcp"),
+            origin: public_url.clone(),
+            token: token.to_string(),
+            session_id: None,
+        };
+        let mut alice = mcp_client(&alice_access);
+        let mut bob = mcp_client(&bob_access);
+        alice.initialize().await?;
+        bob.initialize().await?;
+
+        let before = alice.list_spaces().await?;
+        assert_eq!(before.status(), StatusCode::OK);
+        assert!(
+            first_sse_message(&before.text().await?)
+                .get("result")
+                .is_some()
+        );
+
+        // Alice signs out of Docmost; her MCP grants are still live.
+        revoked.lock().unwrap().insert("alice-docmost".to_string());
+
+        // The call that discovers the rejection answers 401 itself.
+        let discovering = alice.list_spaces().await?;
+        assert_oauth_challenge(&discovering, &metadata_url);
+
+        // So does every later request on her access token, and her refresh
+        // token no longer mints new credentials.
+        assert_oauth_challenge(&alice.list_spaces().await?, &metadata_url);
+        let refresh = |token: String| {
+            let http = http.clone();
+            let endpoint = format!("{public_url}/oauth/token");
+            async move {
+                http.post(endpoint)
+                    .form(&[("grant_type", "refresh_token"), ("refresh_token", &token)])
+                    .send()
+                    .await
+            }
+        };
+        let refused = refresh(alice_refresh).await?;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused.json::<serde_json::Value>().await?["error"],
+            "invalid_grant"
+        );
+
+        // Bob's grants are untouched.
+        let bob_call = bob.list_spaces().await?;
+        assert_eq!(bob_call.status(), StatusCode::OK);
+        assert!(
+            first_sse_message(&bob_call.text().await?)
+                .get("result")
+                .is_some()
+        );
+        assert_eq!(refresh(bob_refresh).await?.status(), StatusCode::OK);
+
+        // A session Docmost revoked before any tool call noticed is caught at
+        // refresh time instead of being handed a fresh access token.
+        revoked.lock().unwrap().insert("carol-docmost".to_string());
+        let refused = refresh(carol_refresh).await?;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!oauth.active_session_fingerprints().await.contains(
+            &OAuthState::session_fingerprint(&test_session(
+                &docmost_url,
+                "carol@example.com",
+                "carol-docmost"
+            ))
+        ));
+
+        task.abort();
+        docmost_task.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn only_messages_end_the_hold_on_an_sse_response() {
+        assert!(matches!(
+            classify_sse_frame(&Bytes::from_static(b"data: \nid: 0\nretry: 3000\n\n")),
+            HeldFrame::Priming
+        ));
+        assert!(matches!(
+            classify_sse_frame(&Bytes::from_static(b":\n\n")),
+            HeldFrame::Other
+        ));
+        let HeldFrame::Message(message) = classify_sse_frame(&Bytes::from_static(
+            b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"x\"}}\n\n",
+        )) else {
+            panic!("a data event is a message");
+        };
+        assert!(is_jsonrpc_error(&message));
+        assert!(!is_jsonrpc_error(
+            br#"{"jsonrpc":"2.0","id":2,"result":{}}"#
+        ));
     }
 }

@@ -99,6 +99,26 @@ Residual risks, stated plainly:
   the key is deleted). Clients should store them as they would any OAuth
   refresh token.
 
+Each grant carries the Docmost session captured at consent, and lives no longer
+than that session. Once Docmost rejects it (the user signed out, the session was
+revoked, or it expired), the server drops every access token, refresh token, and
+unredeemed code carrying it, and `/mcp` answers 401 with the OAuth challenge so
+the client signs in again. A refresh also checks the session with Docmost first.
+
+Dynamic client registration is open (as MCP clients expect) but stores
+nothing: the issued `client_id` carries the client's redirect URIs and name,
+signed with HMAC-SHA256, and is verified at authorization. Anonymous
+registrations therefore cannot exhaust memory or lock out real clients. The
+signing key is created on first start in `~/.docmost-local-mcp/client-id.key`
+(mode 0600; override with `DOCMOST_MCP_CLIENT_ID_KEY_FILE`) and survives
+restarts, because clients cache their `client_id` and do not re-register on
+their own. Deleting the file invalidates every issued `client_id`; affected
+clients must clear their stored authentication and connect again. Replicas
+that share the file's volume agree on one key: it is written in full to a
+temporary file, synced, and hard-linked into place, which never replaces a key
+another process already published, so no process can read a partial key. The
+volume must support hard links.
+
 ## Supported boundary
 
 The default configuration is for a single machine: loopback HTTP, exact Host and
@@ -129,7 +149,8 @@ user before sending `confirm: true`.
   requires `DOCMOST_ALLOW_FILE_CREDENTIALS=true`.
 
 The audit log records timestamp, operation, target identifier, and status only.
-It deliberately excludes page content, comment content, passwords, and tokens.
+It deliberately excludes page content, comment content, uploaded file contents,
+passwords, and tokens.
 
 ## Reporting a vulnerability
 
