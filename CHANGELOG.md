@@ -38,6 +38,21 @@ All notable changes are documented here. The format loosely follows
   callouts as Docmost's `:::type` fences. Embed conversion applies to page writes
   only: Docmost's comment editor has no `embed` node, so a bare video link in a
   comment (`docmost_create_comment`, `docmost_update_comment`) stays a link.
+- **Signing out of Docmost now sends account-auth clients back through OAuth.**
+  Each grant carries the user's Docmost session, but nothing invalidated the grant
+  when Docmost rejected that session (sign-out, revocation, expiry). `/mcp` kept
+  answering 200, every tool call failed with "authenticate this MCP account
+  again", and the client, still believing it was connected, never re-ran OAuth.
+  Now the first rejection drops every access token, refresh token, and code
+  carrying that session. The call that discovered it answers 401 with the
+  `resource_metadata` challenge (its response is held until the first JSON-RPC
+  message, and a successful result is never replaced), every later request gets
+  the same 401, and refresh is refused. A refresh also checks the session with
+  Docmost, so a client that refreshes before calling a tool is not handed fresh
+  tokens for a dead session.
+  Authorization, token issuance and tool calls share one session-expiry cutoff
+  (two minutes), so a grant is never issued for a session the first tool call
+  would revoke.
 - **Pagination metadata is now returned, making the `cursor` parameter usable.**
   Every cursor-based list tool accepted a `cursor`, but responses were folded into
   a bare `Vec` that discarded the rest — so nothing ever told the caller what the

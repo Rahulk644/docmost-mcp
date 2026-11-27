@@ -6,6 +6,7 @@ use base64::{
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Response, header::SET_COOKIE};
@@ -27,15 +28,29 @@ use crate::{
     },
 };
 
-const REFRESH_WINDOW_MS: i64 = 2 * 60 * 1000;
+/// How close to expiry a Docmost session may get before it counts as expired.
+///
+/// One cutoff for every path that decides whether a session is still usable:
+/// the OAuth authorization page, token issuance, and the tool-call path.
+/// Sharing it guarantees a grant is never issued for a session that the first
+/// tool call would immediately treat as expired and revoke.
+pub const SESSION_EXPIRY_CUTOFF_MS: i64 = 2 * 60 * 1000;
 static AUTH_TOKEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?:^|,\s*)authToken=([^;]+)").expect("valid auth token regex"));
+
+/// Runs when Docmost rejects a fixed account session, or the session expires.
+///
+/// The HTTP server uses this to invalidate the MCP grants that carry the session.
+/// Without it the grants stay valid, `/mcp` keeps answering, and the client never
+/// learns that it has to sign in again.
+pub type SessionRejectedHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AuthManager {
     store: Arc<StateStore>,
     configured_base_url: Option<String>,
     fixed_session: Option<AuthenticatedSession>,
+    on_session_rejected: Option<SessionRejectedHook>,
     interactive_auth: bool,
     http: Client,
 }
@@ -60,6 +75,7 @@ impl AuthManager {
         Ok(Self {
             configured_base_url: options.base_url.as_deref().map(normalize_base_url),
             fixed_session: None,
+            on_session_rejected: None,
             interactive_auth: options.interactive_auth,
             store: Arc::new(StateStore::new(base_dir)?),
             http: Client::builder().build()?,
@@ -75,10 +91,25 @@ impl AuthManager {
         Ok(Self {
             configured_base_url: Some(normalize_base_url(&session.base_url)),
             fixed_session: Some(session),
+            on_session_rejected: None,
             interactive_auth: false,
             store: Arc::new(StateStore::new(None)?),
             http: Client::builder().build()?,
         })
+    }
+
+    /// Call `hook` once Docmost has rejected the fixed session (see
+    /// [`SessionRejectedHook`]). The hook is awaited before the tool error is
+    /// returned, so the grants are already gone when the response is written.
+    pub fn with_session_rejected_hook(mut self, hook: SessionRejectedHook) -> Self {
+        self.on_session_rejected = Some(hook);
+        self
+    }
+
+    async fn fixed_session_rejected(&self) {
+        if let Some(hook) = &self.on_session_rejected {
+            hook().await;
+        }
     }
 
     /// Validate Docmost email/password credentials without writing either the
@@ -93,6 +124,7 @@ impl AuthManager {
     pub async fn get_authenticated_session(&self) -> Result<AuthenticatedSession> {
         if let Some(session) = &self.fixed_session {
             if authenticated_session_is_expiring(session) {
+                self.fixed_session_rejected().await;
                 return Err(anyhow!(
                     "Docmost session expired; authenticate this MCP account again."
                 ));
@@ -139,6 +171,7 @@ impl AuthManager {
 
     pub async fn reauthenticate(&self) -> Result<AuthenticatedSession> {
         if self.fixed_session.is_some() {
+            self.fixed_session_rejected().await;
             return Err(anyhow!(
                 "Docmost rejected this account session; authenticate this MCP account again."
             ));
@@ -358,26 +391,24 @@ fn to_authenticated_session(config: StoredConfig, session: StoredSession) -> Aut
     }
 }
 
-fn is_session_expiring(session: &StoredSession) -> bool {
-    let Some(expires_at) = &session.expires_at else {
+/// True when `expires_at` (RFC 3339) is within [`SESSION_EXPIRY_CUTOFF_MS`] of
+/// now. A missing or unparseable expiry is treated as not expiring.
+pub fn session_expires_within_cutoff(expires_at: Option<&str>) -> bool {
+    let Some(expires_at) = expires_at else {
         return false;
     };
-
     let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
         return false;
     };
+    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= SESSION_EXPIRY_CUTOFF_MS
+}
 
-    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+fn is_session_expiring(session: &StoredSession) -> bool {
+    session_expires_within_cutoff(session.expires_at.as_deref())
 }
 
 fn authenticated_session_is_expiring(session: &AuthenticatedSession) -> bool {
-    let Some(expires_at) = &session.expires_at else {
-        return false;
-    };
-    let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
-        return false;
-    };
-    expires_at.timestamp_millis() - Utc::now().timestamp_millis() <= REFRESH_WINDOW_MS
+    session_expires_within_cutoff(session.expires_at.as_deref())
 }
 
 async fn exchange_credentials(http: &Client, input: &LoginInput) -> Result<AuthenticatedSession> {
