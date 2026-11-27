@@ -20,7 +20,7 @@ use tower::ServiceExt;
 
 use crate::{
     auth::manager::SessionRejectedHook,
-    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState},
+    oauth::{DEFAULT_BRAND, OAuthConfig, OAuthState, parse_duration},
     server::DocmostMcpServer,
     staged_upload::{self, DEFAULT_MAX_STAGED_BYTES, UploadStager},
     types::{AuthenticatedSession, StartupConfig},
@@ -127,6 +127,12 @@ impl HttpServerConfig {
                 browser_url: env::var("DOCMOST_MCP_BROWSER_URL").ok(),
                 client_id_key_path: Some(client_id_key_path()?),
                 brand: env::var("DOCMOST_MCP_BRAND").unwrap_or_else(|_| DEFAULT_BRAND.to_string()),
+                min_session_remaining: env::var("DOCMOST_MCP_MIN_SESSION_REMAINING")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| parse_duration(&value))
+                    .transpose()
+                    .context("DOCMOST_MCP_MIN_SESSION_REMAINING")?,
             })
         } else {
             None
@@ -759,6 +765,7 @@ mod tests {
                     browser_url: None,
                     brand: DEFAULT_BRAND.to_string(),
                     client_id_key_path: None,
+                    min_session_remaining: None,
                 }),
                 public_url: None,
                 max_staged_upload_bytes: DEFAULT_MAX_STAGED_BYTES,
