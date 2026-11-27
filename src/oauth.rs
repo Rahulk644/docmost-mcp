@@ -1106,14 +1106,19 @@ async fn browser_session(state: &OAuthState, headers: &HeaderMap) -> BrowserSess
 
 /// A session whose expiry is unknown is accepted: the minimum cannot apply.
 fn classify_session(minimum: Option<Duration>, session: AuthenticatedSession) -> BrowserSession {
-    match (minimum, session_expiry(&session)) {
-        // Compare the time left with the minimum instead of computing
-        // `now + minimum`, which panics when the sum leaves chrono's range.
-        (Some(minimum), Some(expiry)) if expiry.signed_duration_since(Utc::now()) < minimum => {
-            BrowserSession::EndsTooSoon(expiry)
-        }
-        _ => BrowserSession::Usable(session),
+    let within_cutoff =
+        crate::auth::manager::session_expires_within_cutoff(session.expires_at.as_deref());
+    if let (Some(minimum), Some(expiry)) = (minimum, session_expiry(&session))
+        && (within_cutoff || expiry.signed_duration_since(Utc::now()) < minimum)
+    {
+        // Let the renewal button clear a still-valid cookie even when the
+        // session is too close to expiry for MCP to issue tokens.
+        return BrowserSession::EndsTooSoon(expiry);
     }
+    if within_cutoff {
+        return BrowserSession::Missing;
+    }
+    BrowserSession::Usable(session)
 }
 
 /// Rejects a configured minimum no Docmost session could plausibly meet.
@@ -1198,16 +1203,10 @@ async fn native_session(state: &OAuthState, headers: &HeaderMap) -> Option<Authe
         .or_else(|| body.pointer("/user/email"))?
         .as_str()?
         .to_string();
-    let expires_at = crate::auth::manager::get_jwt_expiry_iso(&token);
-    // Same cutoff as token issuance and tool calls: don't authorize a session
-    // that would be treated as expired the moment it is used.
-    if crate::auth::manager::session_expires_within_cutoff(expires_at.as_deref()) {
-        return None;
-    }
     Some(AuthenticatedSession {
         base_url: state.inner.docmost_base_url.clone(),
         email,
-        expires_at,
+        expires_at: crate::auth::manager::get_jwt_expiry_iso(&token),
         token,
     })
 }
@@ -2414,6 +2413,17 @@ mod tests {
         assert!(usable(classify_session(minimum, session(None))));
         assert!(matches!(
             classify_session(minimum, session(Some(Duration::days(1)))),
+            BrowserSession::EndsTooSoon(_)
+        ));
+        assert!(matches!(
+            classify_session(None, session(Some(Duration::minutes(1)))),
+            BrowserSession::Missing
+        ));
+        assert!(matches!(
+            classify_session(
+                Some(Duration::seconds(30)),
+                session(Some(Duration::minutes(1)))
+            ),
             BrowserSession::EndsTooSoon(_)
         ));
     }
