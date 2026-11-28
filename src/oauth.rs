@@ -1334,8 +1334,9 @@ async fn resume_native_authorization(
         .get(&query.request_id)
         .cloned();
     if query.status.is_some() {
-        // The same fact the page below shows when pending is gone: whether
-        // this request was authorized and that grant is still current.
+        // The same facts the page below shows: authorized elsewhere (pending
+        // gone, grant current), still open, or expired/unknown.
+        let now = Utc::now();
         let done = pending.is_none()
             && state
                 .inner
@@ -1343,8 +1344,11 @@ async fn resume_native_authorization(
                 .read()
                 .await
                 .get(&query.request_id)
-                .is_some_and(|grant| grant.expires_at > Utc::now());
-        return hardened_auth_response(Json(json!({ "done": done })).into_response());
+                .is_some_and(|grant| grant.expires_at > now);
+        let open = pending.is_some_and(|p| p.expires_at > now);
+        return hardened_auth_response(
+            Json(json!({ "done": done, "expired": !done && !open })).into_response(),
+        );
     }
     if pending.is_none() {
         // The other tab (sign-in tab or waiting tab) already authorized this
@@ -1602,8 +1606,9 @@ fn oauth_html_error(status: StatusCode, message: &str) -> Response {
 /// the request was authorized from the other tab and, if so, replaces the form
 /// with a note that this tab can be closed. It never reloads or navigates, so
 /// it cannot interrupt an Authorize click in this tab, and it stops once the
-/// form is submitted. It is a constant so the CSP can allow it by hash.
-const WAITING_TAB_SCRIPT: &str = r#"(()=>{const f=document.querySelector('form[action="/oauth/authorize"]');if(!f)return;const u='/oauth/resume?status=1&request_id='+encodeURIComponent(f.elements.request_id.value);let t=0;const stop=()=>clearInterval(t);f.addEventListener('submit',stop);t=setInterval(async()=>{try{const r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;const j=await r.json();if(j.done){stop();const m=document.querySelector('main');const h=document.createElement('h1');h.textContent='Authorized in another tab';const p=document.createElement('p');p.textContent='You authorized this connection in another tab, so you can close this one.';m.replaceChildren(h,p);}}catch(e){}},3000);})();"#;
+/// form is submitted (a check already in flight then shows nothing). When the
+/// request expires it stops and says so. It is a constant so the CSP can allow it by hash.
+const WAITING_TAB_SCRIPT: &str = r#"(()=>{const f=document.querySelector('form[action="/oauth/authorize"]');if(!f)return;const u='/oauth/resume?status=1&request_id='+encodeURIComponent(f.elements.request_id.value);let t=0,sent=false;const stop=()=>clearInterval(t);const show=(a,b)=>{const m=document.querySelector('main');const h=document.createElement('h1');h.textContent=a;const p=document.createElement('p');p.textContent=b;m.replaceChildren(h,p);};f.addEventListener('submit',()=>{sent=true;stop();});t=setInterval(async()=>{try{const r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok||sent)return;const j=await r.json();if(sent)return;if(j.done){stop();show('Authorized in another tab','You authorized this connection in another tab, so you can close this one.');}else if(j.expired){stop();show('Authorization expired','This authorization request has expired. Start the connection again from your client.');}}catch(e){}},3000);})();"#;
 
 /// The hardened CSP plus WAITING_TAB_SCRIPT, allowed by its hash, and the
 /// same-origin fetch it makes. No other script can run.
@@ -2344,7 +2349,14 @@ mod tests {
         assert!(waiting_csp.contains("connect-src 'self'"));
         let status = format!("{resume}&status=1");
         let not_done: serde_json::Value = client.get(&status).send().await?.json().await?;
-        assert_eq!(not_done, json!({ "done": false }));
+        assert_eq!(not_done, json!({ "done": false, "expired": false }));
+        let unknown: serde_json::Value = client
+            .get(format!("{base}/oauth/resume?request_id=nope&status=1"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(unknown, json!({ "done": false, "expired": true }));
         // Neither consent page reloads (a refresh could drop an in-flight
         // Authorize POST); the waiting tab notes the other tab instead.
         assert!(!bob_consent.contains("http-equiv=\"refresh\""));
@@ -2408,7 +2420,7 @@ mod tests {
         assert!(!other_tab.contains("security check failed"));
         // The waiting tab's background check sees the same thing.
         let done: serde_json::Value = client.get(&status).send().await?.json().await?;
-        assert_eq!(done, json!({ "done": true }));
+        assert_eq!(done, json!({ "done": true, "expired": false }));
         mock.abort();
         server.abort();
         Ok(())
