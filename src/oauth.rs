@@ -1306,6 +1306,10 @@ struct ResumeQuery {
     /// link in render_native_page). Absent for the waiting tab's own polls.
     #[serde(default)]
     tab: Option<String>,
+    /// Set by the waiting tab's background check (WAITING_TAB_SCRIPT), which
+    /// asks only whether the request was authorized elsewhere.
+    #[serde(default)]
+    status: Option<String>,
 }
 
 async fn resume_native_authorization(
@@ -1329,6 +1333,19 @@ async fn resume_native_authorization(
         .await
         .get(&query.request_id)
         .cloned();
+    if query.status.is_some() {
+        // The same fact the page below shows when pending is gone: whether
+        // this request was authorized and that grant is still current.
+        let done = pending.is_none()
+            && state
+                .inner
+                .completed
+                .read()
+                .await
+                .get(&query.request_id)
+                .is_some_and(|grant| grant.expires_at > Utc::now());
+        return hardened_auth_response(Json(json!({ "done": done })).into_response());
+    }
     if pending.is_none() {
         // The other tab (sign-in tab or waiting tab) already authorized this
         // request. Say so, without the callback link: this tab may not hold
@@ -1359,20 +1376,27 @@ async fn resume_native_authorization(
     }
     let session = browser_session(&state, &headers).await;
     bind_native_consent(&state, &query.request_id, session.usable()).await;
-    hardened_auth_response(
+    let waiting_tab = query.tab.as_deref() != Some("signin");
+    let response = hardened_auth_response(
         Html(render_native_page(
             &query.request_id,
             &csrf,
             &session,
             &state.inner.brand,
             client_name.as_deref(),
-            // Only the waiting tab notes that the other tab may have finished.
-            // It does not poll on the consent page: a refresh firing while
-            // the Authorize POST is in flight could drop the callback page.
-            query.tab.as_deref() != Some("signin"),
+            // Only the waiting tab watches for the other tab finishing. It
+            // does so with a background check, never a reload: a refresh
+            // firing while the Authorize POST is in flight could drop the
+            // callback page.
+            waiting_tab,
         ))
         .into_response(),
-    )
+    );
+    if waiting_tab {
+        allow_waiting_tab_script(response)
+    } else {
+        response
+    }
 }
 
 /// Signs this browser out of a Docmost session that ends too soon, so the user
@@ -1480,9 +1504,11 @@ fn render_native_page(
     let csrf = escape_html(csrf);
     let content = if let BrowserSession::Usable(session) = session {
         let other_tab = if waiting_tab {
-            "\n<p>If you already authorized in the sign-in tab, you can close this one.</p>"
+            format!(
+                "\n<p>If you already authorized in the sign-in tab, you can close this one.</p><script>{WAITING_TAB_SCRIPT}</script>"
+            )
         } else {
-            ""
+            String::new()
         };
         format!(
             r#"<h1>Connect {brand} to {client}</h1><p>Authorize as <!--email_off-->{}<!--/email_off--> using your existing Docmost session.</p>
@@ -1570,6 +1596,30 @@ fn oauth_html_error(status: StatusCode, message: &str) -> Response {
         )),
     )
         .into_response())
+}
+
+/// Runs on the waiting tab's consent page. Every few seconds it asks whether
+/// the request was authorized from the other tab and, if so, replaces the form
+/// with a note that this tab can be closed. It never reloads or navigates, so
+/// it cannot interrupt an Authorize click in this tab, and it stops once the
+/// form is submitted. It is a constant so the CSP can allow it by hash.
+const WAITING_TAB_SCRIPT: &str = r#"(()=>{const f=document.querySelector('form[action="/oauth/authorize"]');if(!f)return;const u='/oauth/resume?status=1&request_id='+encodeURIComponent(f.elements.request_id.value);let t=0;const stop=()=>clearInterval(t);f.addEventListener('submit',stop);t=setInterval(async()=>{try{const r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;const j=await r.json();if(j.done){stop();const m=document.querySelector('main');const h=document.createElement('h1');h.textContent='Authorized in another tab';const p=document.createElement('p');p.textContent='You authorized this connection in another tab, so you can close this one.';m.replaceChildren(h,p);}}catch(e){}},3000);})();"#;
+
+/// The hardened CSP plus WAITING_TAB_SCRIPT, allowed by its hash, and the
+/// same-origin fetch it makes. No other script can run.
+fn allow_waiting_tab_script(mut response: Response) -> Response {
+    static CSP: std::sync::LazyLock<HeaderValue> = std::sync::LazyLock::new(|| {
+        let hash = base64::engine::general_purpose::STANDARD
+            .encode(Sha256::digest(WAITING_TAB_SCRIPT.as_bytes()));
+        HeaderValue::from_str(&format!(
+            "default-src 'none'; script-src 'sha256-{hash}'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        ))
+        .expect("CSP header is valid")
+    });
+    response
+        .headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, CSP.clone());
+    response
 }
 
 fn hardened_auth_response(mut response: Response) -> Response {
@@ -2280,10 +2330,21 @@ mod tests {
             .get(&resume)
             .header(header::COOKIE, &bob_cookie)
             .send()
-            .await?
-            .text()
             .await?;
+        let waiting_csp = bob_consent.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()?
+            .to_owned();
+        let bob_consent = bob_consent.text().await?;
         assert!(bob_consent.contains("bob@example.com"));
+        // The waiting tab runs exactly WAITING_TAB_SCRIPT, allowed by its hash.
+        assert!(bob_consent.contains(&format!("<script>{WAITING_TAB_SCRIPT}</script>")));
+        let script_hash = base64::engine::general_purpose::STANDARD
+            .encode(Sha256::digest(WAITING_TAB_SCRIPT.as_bytes()));
+        assert!(waiting_csp.contains(&format!("script-src 'sha256-{script_hash}'")));
+        assert!(waiting_csp.contains("connect-src 'self'"));
+        let status = format!("{resume}&status=1");
+        let not_done: serde_json::Value = client.get(&status).send().await?.json().await?;
+        assert_eq!(not_done, json!({ "done": false }));
         // Neither consent page reloads (a refresh could drop an in-flight
         // Authorize POST); the waiting tab notes the other tab instead.
         assert!(!bob_consent.contains("http-equiv=\"refresh\""));
@@ -2292,9 +2353,13 @@ mod tests {
             .get(format!("{resume}&tab=signin"))
             .header(header::COOKIE, &bob_cookie)
             .send()
-            .await?
-            .text()
             .await?;
+        let signin_csp = signin_tab.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()?
+            .to_owned();
+        let signin_tab = signin_tab.text().await?;
+        assert!(!signin_csp.contains("script-src"));
+        assert!(!signin_tab.contains("<script>"));
         assert!(signin_tab.contains("Authorize connection"));
         assert!(!signin_tab.contains("http-equiv=\"refresh\""));
         assert!(!signin_tab.contains("close this one"));
@@ -2341,6 +2406,9 @@ mod tests {
         assert!(other_tab.contains("Authorized in another tab"));
         assert!(!other_tab.contains("continue-to-client"));
         assert!(!other_tab.contains("security check failed"));
+        // The waiting tab's background check sees the same thing.
+        let done: serde_json::Value = client.get(&status).send().await?.json().await?;
+        assert_eq!(done, json!({ "done": true }));
         mock.abort();
         server.abort();
         Ok(())
