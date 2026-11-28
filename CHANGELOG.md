@@ -17,6 +17,32 @@ All notable changes are documented here. The format loosely follows
   two different products. **Breaking** for anyone who pinned the old names.
 
 ### Fixed
+- **Browser sign-in now ends on the consent page.** With browser login, "Open
+  Docmost sign in" opened `/login` in a new tab, which finished on Docmost's
+  home page. The consent prompt had appeared in the original tab, out of
+  sight, so the sign-in looked like it had failed. The link now passes
+  `redirect=/oauth/resume?request_id=…`, so a login that honours `redirect`
+  (docmost-sso does) returns that tab to the consent page. The original tab
+  still continues on its own. The `mcp_auth_csrf` cookie is now
+  `SameSite=Lax`, because browsers withhold `Strict` cookies on that redirect,
+  which arrives from the identity provider. Cross-site POSTs still never carry
+  it, and the pages still cannot be framed.
+  Both tabs can now reach the consent page. After the client has redeemed the
+  code from one, submitting the other says the authorization was already used
+  (and to start again from the client if it did not connect), instead of
+  offering a callback link to a client that stopped listening.
+  The tab left waiting no longer reports the finished request as "expired or
+  its security check failed"; it says it was authorized in another tab. Its
+  consent form notes that it can be closed if the sign-in tab (marked
+  `tab=signin` in the return path) already authorized, and a small script
+  (allowed by its hash in the CSP) checks `/oauth/resume?status=1` every few
+  seconds and replaces the form with that message once the other tab has
+  authorized. It never reloads the page, so it cannot drop an Authorize click
+  in that tab. A repeat submission
+  replays the callback link only with the form's CSRF token, not with
+  `request_id` alone.
+  Each consent form now names the account it showed, and authorizing refuses
+  it if the browser has since switched to another Docmost account.
 - **Protected-resource metadata is also served at its RFC 9728 path.** The
   metadata for the `/mcp` resource belongs at
   `/.well-known/oauth-protected-resource/mcp` (the well-known path plus the
